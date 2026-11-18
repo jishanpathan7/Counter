@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { api, fmtTime24, useData, useLive, useNow } from '../api.js';
-import { AlertState, Empty, SessionBadge } from '../components.jsx';
+import { fmtTime24, useApp, useData, useNow } from '../api.js';
+import { AlertState, Avatar, Empty, Icon, Loading, SessionBadge } from '../ui.jsx';
 
 const BUTTONS = [
   { status: 'P', label: 'P', title: 'Present' },
@@ -8,11 +8,20 @@ const BUTTONS = [
   { status: 'L', label: 'L', title: 'Leave / late' },
 ];
 
+function savedBatch(slug) {
+  try {
+    return Number(localStorage.getItem(`batch:${slug}`)) || null;
+  } catch {
+    return null;
+  }
+}
+
 export default function Teacher() {
-  const { version, toast } = useLive();
+  const { api, version, toast, slug, info } = useApp();
   const { data: batches } = useData('/batches');
-  const [batchId, setBatchId] = useState(() => Number(localStorage.getItem('teacherBatch')) || null);
+  const [batchId, setBatchId] = useState(() => savedBatch(slug));
   const [session, setSession] = useState(null);
+  const [blocked, setBlocked] = useState(null);
   const [pending, setPending] = useState({});
   const now = useNow();
 
@@ -23,12 +32,18 @@ export default function Teacher() {
   useEffect(() => {
     if (!batchId) return;
     try {
-      localStorage.setItem('teacherBatch', String(batchId));
+      localStorage.setItem(`batch:${slug}`, String(batchId));
     } catch {
-      /* storage may be unavailable */
+      /* storage unavailable */
     }
-    api.post(`/batches/${batchId}/today`).then(setSession).catch((e) => toast(e.message, 'bad'));
-  }, [batchId, version, toast]);
+    api
+      .post(`/batches/${batchId}/today`)
+      .then((s) => {
+        setSession(s);
+        setBlocked(null);
+      })
+      .catch((e) => (e.status === 409 ? setBlocked(e.message) : toast(e.message, 'bad')));
+  }, [batchId, version, api, slug, toast]);
 
   const mark = async (studentId, status) => {
     setPending((p) => ({ ...p, [studentId]: status }));
@@ -37,10 +52,7 @@ export default function Teacher() {
     } catch (e) {
       toast(e.message, 'bad');
     } finally {
-      setPending((p) => {
-        const { [studentId]: _, ...rest } = p;
-        return rest;
-      });
+      setPending(({ [studentId]: _, ...rest }) => rest);
     }
   };
 
@@ -53,47 +65,67 @@ export default function Teacher() {
     }
   };
 
-  if (!batches) return <p className="muted">Loading…</p>;
-  if (!batches.length) return <Empty title="No batches yet">Create a batch in <a href="#/setup">Setup</a> first.</Empty>;
+  if (!batches) return <Loading height={300} />;
+  if (!batches.length) {
+    return (
+      <Empty title={info.role === 'teacher' ? 'No batches assigned to you' : 'No batches yet'} icon="calendar">
+        {info.role === 'teacher' ? 'Ask the owner to assign your batches in Settings → Team.' : <>Create a batch in <a href="#/settings/batches">Settings</a> first.</>}
+      </Empty>
+    );
+  }
+
+  const marked = session ? session.students.filter((s) => s.status).length : 0;
+  const total = session?.students.length ?? 0;
 
   return (
     <div className="teacher">
-      <div className="chips-row">
+      <div>
+        <h1>Take attendance</h1>
+        <p className="muted">Tap P, A or L. Marks save instantly; parents of absent students get a WhatsApp after verification.</p>
+      </div>
+      <div className="chips-row" role="tablist">
         {batches.map((b) => (
-          <button key={b.id} className={`chip-btn ${b.id === batchId ? 'active' : ''}`} onClick={() => setBatchId(b.id)}>
+          <button key={b.id} role="tab" aria-selected={b.id === batchId} className={`chip-btn ${b.id === batchId ? 'active' : ''}`} onClick={() => setBatchId(b.id)}>
             {b.name} <span className="muted">· {fmtTime24(b.startTime)}</span>
           </button>
         ))}
       </div>
 
-      {session && (
+      {blocked && <div className="banner"><Icon name="calendar" /> {blocked}</div>}
+
+      {session && !blocked && (
         <section className="card">
           <div className="session-head">
             <div>
-              <div className="eyebrow">Live · {session.batch.name} · {fmtTime24(session.batch.startTime)}</div>
-              <h2>Mark attendance</h2>
+              <div className="eyebrow">{session.batch.name} · {fmtTime24(session.batch.startTime)}</div>
+              <h2>{marked}/{total} marked</h2>
             </div>
             <SessionBadge session={session} now={now} />
           </div>
+          <div className="progress-line"><span style={{ width: `${total ? (marked / total) * 100 : 0}%` }} /></div>
 
           <ul className="mark-list">
             {session.students.map((s) => {
               const current = pending[s.id] ?? s.status;
               return (
                 <li key={s.id} className="mark-row">
-                  <div className="mark-info">
-                    <div className="roster-name">{s.name}</div>
-                    {s.alert ? (
-                      <AlertState alert={s.alert} task={s.task} now={now} />
-                    ) : (
-                      s.note && s.source !== 'teacher' && <div className="muted small">{s.note}</div>
-                    )}
+                  <div className="who">
+                    <Avatar name={s.name} />
+                    <div className="mark-info">
+                      <div className="roster-name ellipsis">{s.name}</div>
+                      {s.alert ? (
+                        <AlertState alert={s.alert} task={s.task} now={now} />
+                      ) : (
+                        s.note && s.source !== 'teacher' && <div className="muted small">{s.note}</div>
+                      )}
+                    </div>
                   </div>
                   <div className="pal" role="group" aria-label={`Attendance for ${s.name}`}>
                     {BUTTONS.map((b) => (
                       <button
                         key={b.status}
                         title={b.title}
+                        aria-label={`${b.title}: ${s.name}`}
                         aria-pressed={current === b.status}
                         className={`pal-btn s-${b.status} ${current === b.status ? 'on' : ''}`}
                         onClick={() => mark(s.id, b.status)}
@@ -110,12 +142,12 @@ export default function Teacher() {
 
           <div className="teacher-foot">
             <button className="btn ghost" onClick={markAllPresent} disabled={!session.students.length}>
-              Mark all present
+              <Icon name="check" /> Mark all present
             </button>
-            <span className="muted small">
+            <span className="muted small grow">
               {session.verifiedAt
                 ? 'Verified. Marking someone absent now alerts their parent right away.'
-                : "Marks save as you tap. Anyone left unmarked counts as absent when verification runs."}
+                : 'Anyone left unmarked counts as absent when verification runs.'}
             </span>
           </div>
         </section>

@@ -1,11 +1,11 @@
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import express from 'express';
-import { HttpError } from './service.js';
+import { HttpError, renderTemplate } from './service.js';
 import { parseWebhook, verifySignature } from './messaging.js';
+import { DEMO_LOGINS, DEMO_PIN } from './seed.js';
 
-const COOKIE = 'att_auth';
+const COOKIE = 'aa_session';
 
 function parseCookies(header = '') {
   return Object.fromEntries(
@@ -17,161 +17,328 @@ function parseCookies(header = '') {
   );
 }
 
-/** Pushes a "something changed" event to every open dashboard so screens refresh live. */
+/** Pushes "something changed" to open screens of one institute so they refresh live. */
 export function createEventHub() {
-  const clients = new Set();
-  let timer = null;
+  const clients = new Map(); // slug -> Set<res>
+  const timers = new Map();
+  const send = (slug) => {
+    for (const [s, set] of clients) {
+      if (slug && s !== slug) continue;
+      for (const res of set) res.write('data: change\n\n');
+    }
+  };
   return {
-    add(res) {
-      clients.add(res);
-      res.on('close', () => clients.delete(res));
+    add(slug, res) {
+      if (!clients.has(slug)) clients.set(slug, new Set());
+      clients.get(slug).add(res);
+      res.on('close', () => clients.get(slug)?.delete(res));
     },
-    broadcast() {
-      clearTimeout(timer);
-      timer = setTimeout(() => {
-        for (const res of clients) res.write('data: change\n\n');
-      }, 100);
-    },
-    get size() {
-      return clients.size;
+    broadcast(slug = null) {
+      const key = slug ?? '*';
+      clearTimeout(timers.get(key));
+      timers.set(key, setTimeout(() => send(slug), 120));
     },
   };
 }
 
-export function createApp({ service, hub, mode, accessCode = '', whatsapp = {}, staticDir = null, logger = console }) {
+/** CSV cell, protected against spreadsheet formula injection. */
+function csvCell(v) {
+  let s = v == null ? '' : String(v);
+  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+export function createApp({ platform, hub, demo = false, staticDir = null, logger = console }) {
   const app = express();
   app.disable('x-powered-by');
-  app.use(express.json({ limit: '200kb', verify: (req, _res, buf) => (req.rawBody = buf) }));
-
-  // ------------------------------------------------------------ WhatsApp webhook
-  app.get('/webhooks/whatsapp', (req, res) => {
-    const ok = req.query['hub.mode'] === 'subscribe' && whatsapp.verifyToken && req.query['hub.verify_token'] === whatsapp.verifyToken;
-    if (!ok) return res.sendStatus(403);
-    res.type('text/plain').send(String(req.query['hub.challenge'] ?? ''));
+  app.use(express.json({ limit: '1mb', verify: (req, _res, buf) => (req.rawBody = buf) }));
+  app.use((_req, res, next) => {
+    res.set({ 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'same-origin', 'X-Frame-Options': 'DENY' });
+    next();
   });
 
-  app.post('/webhooks/whatsapp', async (req, res) => {
-    if (whatsapp.appSecret && !verifySignature(req.rawBody, req.get('x-hub-signature-256'), whatsapp.appSecret)) {
-      return res.sendStatus(401);
-    }
+  // ------------------------------------------------------------------ WhatsApp webhooks (one per institute)
+  const webhookService = (slug) => {
+    if (slug) return platform.service(slug);
+    const all = platform.listInstitutes();
+    if (all.length !== 1) throw new HttpError(404, 'Use /webhooks/whatsapp/<institute>');
+    return platform.service(all[0].slug);
+  };
+  const verifyWebhook = (req, res) => {
+    const cfg = webhookService(req.params.slug).getWhatsAppConfig();
+    const ok = req.query['hub.mode'] === 'subscribe' && cfg.verifyToken && req.query['hub.verify_token'] === cfg.verifyToken;
+    if (!ok) return res.sendStatus(403);
+    res.type('text/plain').send(String(req.query['hub.challenge'] ?? ''));
+  };
+  const receiveWebhook = async (req, res) => {
+    const svc = webhookService(req.params.slug);
+    const cfg = svc.getWhatsAppConfig();
+    if (cfg.appSecret && !verifySignature(req.rawBody, req.get('x-hub-signature-256'), cfg.appSecret)) return res.sendStatus(401);
     res.sendStatus(200); // acknowledge fast; Meta retries slow webhooks
     for (const reply of parseWebhook(req.body)) {
       try {
-        await service.handleReply(reply);
+        await svc.handleReply(reply);
       } catch (err) {
         logger.error?.(`Webhook reply failed: ${err.message}`);
       }
     }
-  });
+  };
+  app.get('/webhooks/whatsapp/:slug', verifyWebhook);
+  app.post('/webhooks/whatsapp/:slug', receiveWebhook);
+  app.get('/webhooks/whatsapp', verifyWebhook);
+  app.post('/webhooks/whatsapp', receiveWebhook);
 
-  // ------------------------------------------------------------ access code
-  const authToken = accessCode ? crypto.createHash('sha256').update(`attendance:${accessCode}`).digest('hex') : null;
-  const isAuthed = (req) => !authToken || parseCookies(req.headers.cookie)[COOKIE] === authToken;
+  // ------------------------------------------------------------------ auth
+  const userOf = (req) => platform.userFromToken(parseCookies(req.headers.cookie)[COOKIE]);
+  const setSession = (req, res, user) => {
+    const secure = req.secure || req.get('x-forwarded-proto') === 'https' ? '; Secure' : '';
+    res.setHeader('Set-Cookie', `${COOKIE}=${platform.issueToken(user)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${60 * 60 * 24 * 30}${secure}`);
+  };
 
   app.get('/api/health', (_req, res) => res.json({ ok: true }));
 
-  app.get('/api/info', (req, res) => {
-    res.json({ mode, tz: service.tz, authRequired: Boolean(authToken), authed: isAuthed(req), instituteName: service.getSettings().instituteName });
+  app.get('/api/auth/me', (req, res) => {
+    const u = userOf(req);
+    res.json({
+      needsSetup: platform.needsSetup(),
+      user: platform.publicUser(u),
+      memberships: u ? platform.membershipsFor(u) : [],
+      demo: demo ? { pin: DEMO_PIN, logins: DEMO_LOGINS } : null,
+    });
   });
 
-  app.post('/api/login', (req, res) => {
-    if (!authToken) return res.json({ ok: true });
-    const given = String(req.body?.code ?? '');
-    const a = Buffer.from(crypto.createHash('sha256').update(`attendance:${given}`).digest('hex'));
-    if (!crypto.timingSafeEqual(a, Buffer.from(authToken))) throw new HttpError(401, 'Wrong access code');
-    const secure = req.secure || req.get('x-forwarded-proto') === 'https' ? '; Secure' : '';
-    res.setHeader('Set-Cookie', `${COOKIE}=${authToken}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${60 * 60 * 24 * 30}${secure}`);
+  app.post('/api/auth/login', (req, res) => {
+    const u = platform.authenticate(req.body?.phone, String(req.body?.pin ?? ''));
+    setSession(req, res, u);
+    res.json({ user: platform.publicUser(u), memberships: platform.membershipsFor(u) });
+  });
+
+  app.post('/api/auth/logout', (_req, res) => {
+    res.setHeader('Set-Cookie', `${COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`);
     res.json({ ok: true });
   });
 
+  // First run: create the agency admin and the first institute.
+  app.post('/api/setup', (req, res) => {
+    if (!platform.needsSetup()) throw new HttpError(409, 'Already set up');
+    const { name, phone, pin, instituteName, slug, city } = req.body ?? {};
+    const user = platform.createUser({ name, phone, pin, isAgency: true });
+    const inst = platform.createInstitute({ name: instituteName, slug, city, ownerUserId: user.id });
+    setSession(req, res, user);
+    res.status(201).json({ user: platform.publicUser(user), institute: inst });
+  });
+
   app.use('/api', (req, _res, next) => {
-    if (!isAuthed(req)) throw new HttpError(401, 'Access code required');
+    req.user = userOf(req);
+    if (!req.user) throw new HttpError(401, 'Please log in');
     next();
   });
 
-  // ------------------------------------------------------------ live updates
-  app.get('/api/events', (req, res) => {
+  app.post('/api/auth/pin', (req, res) => {
+    platform.authenticate(req.user.phone, String(req.body?.current ?? ''));
+    platform.setPin(req.user.id, req.body?.next);
+    setSession(req, res, platform.getUser(req.user.id));
+    res.json({ ok: true });
+  });
+
+  // ------------------------------------------------------------------ agency console
+  const agency = express.Router();
+  agency.use((req, _res, next) => {
+    if (!req.user.is_agency) throw new HttpError(403, 'Agency admins only');
+    next();
+  });
+  agency.get('/overview', (_req, res) => res.json(platform.agencyOverview()));
+  agency.post('/institutes', (req, res) => {
+    const { name, slug, city, feeMonthly, ownerName, ownerPhone, ownerPin } = req.body ?? {};
+    const owner = ownerPhone ? { name: ownerName, phone: ownerPhone, pin: ownerPin } : null;
+    res.status(201).json(platform.createInstitute({ name, slug, city, feeMonthly, owner, ownerUserId: owner ? null : req.user.id }));
+  });
+  agency.patch('/institutes/:slug', (req, res) => res.json(platform.updateInstitute(req.params.slug, req.body ?? {})));
+  app.use('/api/agency', agency);
+
+  // ------------------------------------------------------------------ one institute
+  const inst = express.Router({ mergeParams: true });
+  app.use('/api/i/:slug', (req, _res, next) => {
+    const m = platform.membership(req.user, req.params.slug);
+    if (!m) throw new HttpError(404, 'Institute not found');
+    if (m.status === 'paused' && !req.user.is_agency) throw new HttpError(403, 'This institute is paused. Contact your service provider.');
+    req.member = m;
+    req.svc = platform.service(req.params.slug);
+    next();
+  }, inst);
+
+  const allow = (...roles) => (req, _res, next) => {
+    if (!roles.includes(req.member.role)) throw new HttpError(403, "You don't have access to this");
+    next();
+  };
+  const MGMT = allow('owner', 'staff');
+  const OWNER = allow('owner');
+
+  // Teachers only see the batches assigned to them (all batches if none are assigned).
+  const canTeach = (req, batchId) =>
+    req.member.role !== 'teacher' || !req.member.batchIds.length || req.member.batchIds.includes(Number(batchId));
+  const sessionFor = (req) => {
+    const s = req.svc.getSessionRow(Number(req.params.id));
+    if (!canTeach(req, s.batch_id)) throw new HttpError(403, 'Not your batch');
+    return s;
+  };
+  const sessionView = (req, id) => {
+    const v = req.svc.getSessionView(id);
+    if (req.member.role === 'teacher') v.students = v.students.map(({ parentPhone, ...s }) => s);
+    return v;
+  };
+
+  inst.get('/info', (req, res) => {
+    const { slug, name, city, status, role, batchIds } = req.member;
+    res.json({
+      institute: { slug, name, city, status },
+      role,
+      batchIds,
+      user: platform.publicUser(req.user),
+      mode: req.svc.messenger.mode,
+      tz: req.svc.tz,
+      today: req.svc.today(),
+    });
+  });
+
+  inst.get('/events', (req, res) => {
     res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
     res.flushHeaders();
     res.write('retry: 3000\n\n');
-    hub.add(res);
+    hub.add(req.params.slug, res);
     const ping = setInterval(() => res.write(': ping\n\n'), 25_000);
     res.on('close', () => clearInterval(ping));
   });
 
-  // ------------------------------------------------------------ settings, batches, students
-  app.get('/api/settings', (_req, res) => res.json(service.getSettings()));
-  app.patch('/api/settings', (req, res) => res.json(service.updateSettings(req.body)));
+  // dashboard
+  inst.get('/board', MGMT, (req, res) => {
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(req.query.date ?? '') ? req.query.date : undefined;
+    res.json(req.svc.getBoard(date));
+  });
+  inst.get('/activity', MGMT, (req, res) => res.json(req.svc.getActivity(20)));
 
-  app.get('/api/batches', (_req, res) => res.json(service.listBatches()));
-  app.post('/api/batches', (req, res) => res.status(201).json(service.createBatch(req.body ?? {})));
-  app.patch('/api/batches/:id', (req, res) => res.json(service.updateBatch(Number(req.params.id), req.body)));
-  app.delete('/api/batches/:id', (req, res) => {
-    service.deleteBatch(Number(req.params.id));
+  // batches
+  inst.get('/batches', (req, res) => res.json(req.svc.listBatches().filter((b) => canTeach(req, b.id))));
+  inst.post('/batches', OWNER, (req, res) => res.status(201).json(req.svc.createBatch(req.body ?? {})));
+  inst.patch('/batches/:id', OWNER, (req, res) => res.json(req.svc.updateBatch(Number(req.params.id), req.body ?? {})));
+  inst.delete('/batches/:id', OWNER, (req, res) => {
+    req.svc.deleteBatch(Number(req.params.id));
     res.sendStatus(204);
   });
-  app.post('/api/batches/:id/today', (req, res) => {
-    const s = service.ensureSession(Number(req.params.id));
-    res.json(service.getSessionView(s.id));
+  inst.post('/batches/:id/today', (req, res) => {
+    if (!canTeach(req, req.params.id)) throw new HttpError(403, 'Not your batch');
+    if (req.svc.holidayOn(req.svc.today())) throw new HttpError(409, `Today is a holiday: ${req.svc.holidayOn(req.svc.today())}`);
+    const s = req.svc.ensureSession(Number(req.params.id));
+    res.json(sessionView(req, s.id));
   });
 
-  app.get('/api/students', (req, res) => res.json(service.listStudents(req.query.batchId ? Number(req.query.batchId) : null)));
-  app.post('/api/students', (req, res) => res.status(201).json(service.createStudent(req.body ?? {})));
-  app.patch('/api/students/:id', (req, res) => res.json(service.updateStudent(Number(req.params.id), req.body)));
-  app.delete('/api/students/:id', (req, res) => {
-    service.deleteStudent(Number(req.params.id));
+  // sessions
+  inst.get('/sessions/:id', (req, res) => res.json(sessionView(req, sessionFor(req).id)));
+  inst.get('/sessions/:id/timeline', MGMT, (req, res) => res.json(req.svc.getTimeline(Number(req.params.id))));
+  inst.post('/sessions/:id/mark', async (req, res) => {
+    const s = sessionFor(req);
+    await req.svc.mark(s.id, Number(req.body?.studentId), req.body?.status);
+    res.json(sessionView(req, s.id));
+  });
+  inst.post('/sessions/:id/mark-all', async (req, res) => {
+    const s = sessionFor(req);
+    await req.svc.markAll(s.id, req.body?.status ?? 'P');
+    res.json(sessionView(req, s.id));
+  });
+  inst.post('/sessions/:id/verify', MGMT, async (req, res) => {
+    await req.svc.verify(Number(req.params.id));
+    res.json(sessionView(req, Number(req.params.id)));
+  });
+  inst.post('/sessions/:id/start-now', MGMT, (req, res) => {
+    req.svc.startNow(Number(req.params.id));
+    res.json(sessionView(req, Number(req.params.id)));
+  });
+
+  // students
+  inst.get('/students', MGMT, (req, res) => res.json(req.svc.getStudentDirectory({ batchId: req.query.batchId ? Number(req.query.batchId) : null })));
+  inst.get('/students/:id', MGMT, (req, res) => res.json(req.svc.getStudentProfile(Number(req.params.id))));
+  inst.post('/students', MGMT, (req, res) => res.status(201).json(req.svc.createStudent(req.body ?? {})));
+  inst.post('/students/import', OWNER, (req, res) => res.json(req.svc.importStudents(req.body ?? {})));
+  inst.patch('/students/:id', MGMT, (req, res) => res.json(req.svc.updateStudent(Number(req.params.id), req.body ?? {})));
+  inst.delete('/students/:id', OWNER, (req, res) => {
+    req.svc.deleteStudent(Number(req.params.id));
     res.sendStatus(204);
   });
 
-  // ------------------------------------------------------------ attendance
-  app.get('/api/board', (req, res) => {
-    const date = req.query.date && /^\d{4}-\d{2}-\d{2}$/.test(req.query.date) ? req.query.date : undefined;
-    res.json(service.getBoard(date));
-  });
-  app.get('/api/sessions/:id', (req, res) => res.json(service.getSessionView(Number(req.params.id))));
-  app.post('/api/sessions/:id/mark', async (req, res) => {
-    const id = Number(req.params.id);
-    await service.mark(id, Number(req.body?.studentId), req.body?.status);
-    res.json(service.getSessionView(id));
-  });
-  app.post('/api/sessions/:id/mark-all', async (req, res) => {
-    const id = Number(req.params.id);
-    await service.markAll(id, req.body?.status ?? 'P');
-    res.json(service.getSessionView(id));
-  });
-  app.post('/api/sessions/:id/verify', async (req, res) => {
-    const id = Number(req.params.id);
-    await service.verify(id);
-    res.json(service.getSessionView(id));
-  });
-  app.post('/api/sessions/:id/start-now', (req, res) => {
-    const id = Number(req.params.id);
-    service.startNow(id);
-    res.json(service.getSessionView(id));
-  });
+  // holidays
+  inst.get('/holidays', (req, res) => res.json(req.svc.listHolidays()));
+  inst.post('/holidays', OWNER, (req, res) => res.json(req.svc.addHoliday(req.body ?? {})));
+  inst.delete('/holidays/:date', OWNER, (req, res) => res.json(req.svc.deleteHoliday(req.params.date)));
 
-  // ------------------------------------------------------------ call tasks
-  app.get('/api/tasks', (req, res) => res.json(service.listTasks(req.query.status === 'done' ? 'done' : 'open')));
-  app.post('/api/tasks/:id/complete', (req, res) => {
-    service.completeTask(Number(req.params.id), req.body ?? {});
+  // call tasks
+  inst.get('/tasks', MGMT, (req, res) => res.json(req.svc.listTasks(req.query.status === 'done' ? 'done' : 'open')));
+  inst.post('/tasks/:id/complete', MGMT, (req, res) => {
+    req.svc.completeTask(Number(req.params.id), req.body ?? {});
     res.json({ ok: true });
   });
 
-  // ------------------------------------------------------------ messages
-  app.get('/api/messages/threads', (_req, res) => res.json(service.listThreads()));
-  app.get('/api/messages', (req, res) => res.json(service.listMessages(String(req.query.phone ?? ''))));
-  app.post('/api/simulator/reply', async (req, res) => {
-    if (mode !== 'simulator') throw new HttpError(404, 'The simulator is off because real WhatsApp is configured');
+  // messages
+  inst.get('/messages/threads', MGMT, (req, res) => res.json(req.svc.listThreads()));
+  inst.get('/messages', MGMT, (req, res) => res.json(req.svc.listMessages(String(req.query.phone ?? ''))));
+  inst.post('/simulator/reply', MGMT, async (req, res) => {
+    if (req.svc.messenger.mode !== 'simulator') throw new HttpError(409, 'The simulator is off because real WhatsApp is connected');
     const { phone, payload, text } = req.body ?? {};
     if (!phone || (!payload && !String(text ?? '').trim())) throw new HttpError(400, 'phone and a reply are required');
-    res.json(await service.handleReply({ phone, payload, text }));
+    res.json(await req.svc.handleReply({ phone, payload, text }));
+  });
+
+  // reports
+  inst.get('/reports', MGMT, (req, res) => res.json(req.svc.getReport({ from: req.query.from, to: req.query.to, batchId: req.query.batchId || null })));
+  inst.get('/reports.csv', MGMT, (req, res) => {
+    const r = req.svc.getReport({ from: req.query.from, to: req.query.to, batchId: req.query.batchId || null });
+    const head = ['Student', 'Batch', 'Parent', 'Parent WhatsApp', 'Present', 'Absent', 'Leave/Late', 'Bunks', 'Classes', 'Attendance %', 'At risk'];
+    const lines = [head, ...r.students.map((s) => [s.name, s.batchName, s.parentName, `+${s.parentPhone}`, s.P, s.A, s.L, s.bunks, s.total, s.pct ?? '', s.riskReasons.join('; ')])];
+    res.set('Content-Type', 'text/csv; charset=utf-8');
+    res.set('Content-Disposition', `attachment; filename="attendance-${req.params.slug}-${r.from}-to-${r.to}.csv"`);
+    res.send(`﻿${lines.map((l) => l.map(csvCell).join(',')).join('\r\n')}`);
+  });
+
+  // settings
+  inst.get('/settings', MGMT, (req, res) => res.json(req.svc.getSettings()));
+  inst.patch('/settings', OWNER, (req, res) => {
+    const s = req.svc.updateSettings(req.body ?? {});
+    if (req.body?.instituteName) platform.updateInstitute(req.params.slug, { name: req.body.instituteName });
+    res.json(s);
+  });
+  inst.post('/settings/preview', MGMT, (req, res) => {
+    const s = req.svc.getSettings();
+    res.json({
+      text: renderTemplate(req.body?.template ?? s.alertTemplate, {
+        parent: 'Mr. Verma', student: 'Rohan', batch: 'Class 10 · Batch B', time: '4:00 PM', institute: s.instituteName,
+      }),
+    });
+  });
+  inst.get('/whatsapp', OWNER, (req, res) => res.json({ ...req.svc.getWhatsAppPublic(), mode: req.svc.messenger.mode }));
+  inst.patch('/whatsapp', OWNER, (req, res) => {
+    const cfg = req.svc.updateWhatsAppConfig(req.body ?? {});
+    res.json({ ...cfg, mode: platform.refreshMessenger(req.params.slug) });
+  });
+  inst.get('/digest/preview', OWNER, (req, res) => res.json({ text: req.svc.buildDigest() }));
+  inst.post('/digest/send', OWNER, async (req, res) => {
+    await req.svc.maybeSendDigest({ force: true });
+    res.json({ ok: true });
+  });
+
+  // team
+  inst.get('/team', OWNER, (req, res) => res.json(platform.listTeam(req.params.slug)));
+  inst.post('/team', OWNER, (req, res) => res.status(201).json(platform.addMember(req.params.slug, req.body ?? {})));
+  inst.patch('/team/:userId', OWNER, (req, res) => res.json(platform.updateMember(req.params.slug, Number(req.params.userId), req.body ?? {})));
+  inst.delete('/team/:userId', OWNER, (req, res) => {
+    if (Number(req.params.userId) === req.user.id) throw new HttpError(409, "You can't remove yourself");
+    platform.removeMember(req.params.slug, Number(req.params.userId));
+    res.sendStatus(204);
   });
 
   app.use('/api', (_req, _res, next) => next(new HttpError(404, 'Not found')));
 
-  // ------------------------------------------------------------ built frontend
+  // ------------------------------------------------------------------ built frontend
   if (staticDir && fs.existsSync(path.join(staticDir, 'index.html'))) {
-    app.use(express.static(staticDir, { index: false, maxAge: '1h' }));
+    app.use(express.static(staticDir, { index: false, maxAge: '1h', setHeaders: (res, p) => p.endsWith('sw.js') && res.set('Cache-Control', 'no-cache') }));
     app.get(/^\/(?!api\/|webhooks\/).*/, (_req, res) => res.sendFile(path.join(staticDir, 'index.html')));
   }
 

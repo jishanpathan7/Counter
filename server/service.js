@@ -1,4 +1,4 @@
-import { formatTime, localDate, localWeekday, zonedTimeToIso } from './time.js';
+import { addDays, daysBetween, formatTime, localDate, localTime, localWeekday, zonedTimeToIso } from './time.js';
 
 export class HttpError extends Error {
   constructor(status, message) {
@@ -7,11 +7,30 @@ export class HttpError extends Error {
   }
 }
 
+export const DEFAULT_ALERT_TEMPLATE =
+  'Namaste {parent}, aaj ki {batch} class ({time}) mein {student} ki attendance record nahi hui. Please confirm.';
+
 const DEFAULT_SETTINGS = {
   instituteName: 'My Coaching Institute',
   verifyAfterMinutes: '10', // Step 2: absent entries are verified this long after class starts
   replyTimeoutMinutes: '3', // Step 6: no parent reply within this → staff call task
+  alertTemplate: DEFAULT_ALERT_TEMPLATE,
+  digestEnabled: '0', // end-of-day WhatsApp summary to the owner
+  digestTime: '20:00',
+  ownerPhone: '',
 };
+
+/** WhatsApp Cloud API settings, kept per institute. Secrets never leave the server. */
+const WA_KEYS = ['token', 'phoneNumberId', 'template', 'templateLang', 'verifyToken', 'appSecret'];
+const WA_SECRET = new Set(['token', 'appSecret']);
+
+/** Fill {placeholders} in a message template. */
+export function renderTemplate(template, vars) {
+  return String(template).replace(/\{(\w+)\}/g, (m, k) => (vars[k] !== undefined ? String(vars[k]) : m));
+}
+
+/** A student is "at risk" if they keep missing class without a reason. */
+export const AT_RISK = { minPct: 75, recentAbsences: 3, recentDays: 14 };
 
 /** Parent reply options sent as WhatsApp quick-reply buttons. */
 export const REPLY_OPTIONS = {
@@ -65,6 +84,12 @@ function parseDays(days) {
   return nums.sort().join(',');
 }
 
+function parseDuration(v) {
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 15 || n > 480) throw new HttpError(400, 'Class length must be 15–480 minutes');
+  return n;
+}
+
 function parsePhone(value) {
   const phone = normalizePhone(value);
   if (phone.length < 11 || phone.length > 15) throw new HttpError(400, 'Enter a valid WhatsApp number');
@@ -99,21 +124,44 @@ export class AttendanceService {
 
   // ---------------------------------------------------------------- settings
 
-  getSettings() {
+  rawSettings() {
     const rows = this.db.prepare('SELECT key, value FROM settings').all();
-    const s = { ...DEFAULT_SETTINGS, ...Object.fromEntries(rows.map((r) => [r.key, r.value])) };
+    return { ...DEFAULT_SETTINGS, ...Object.fromEntries(rows.map((r) => [r.key, r.value])) };
+  }
+
+  setSetting(key, value) {
+    this.db
+      .prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+      .run(key, String(value));
+  }
+
+  getSettings() {
+    const s = this.rawSettings();
     return {
       instituteName: s.instituteName,
       verifyAfterMinutes: Number(s.verifyAfterMinutes),
       replyTimeoutMinutes: Number(s.replyTimeoutMinutes),
+      alertTemplate: s.alertTemplate,
+      digestEnabled: s.digestEnabled === '1',
+      digestTime: s.digestTime,
+      ownerPhone: s.ownerPhone,
     };
   }
 
   updateSettings(patch = {}) {
-    const upsert = this.db.prepare(
-      'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
-    );
+    const upsert = { run: (k, v) => this.setSetting(k, v) };
     if (patch.instituteName !== undefined) upsert.run('instituteName', requireText(patch.instituteName, 'Institute name'));
+    if (patch.alertTemplate !== undefined) {
+      const t = requireText(patch.alertTemplate, 'Alert message', 900);
+      if (!t.includes('{student}')) throw new HttpError(400, 'The alert message must include {student}');
+      upsert.run('alertTemplate', t);
+    }
+    if (patch.digestEnabled !== undefined) upsert.run('digestEnabled', patch.digestEnabled ? '1' : '0');
+    if (patch.digestTime !== undefined) {
+      if (!TIME_RE.test(String(patch.digestTime))) throw new HttpError(400, 'Summary time must be HH:MM');
+      upsert.run('digestTime', patch.digestTime);
+    }
+    if (patch.ownerPhone !== undefined) upsert.run('ownerPhone', patch.ownerPhone ? parsePhone(patch.ownerPhone) : '');
     for (const key of ['verifyAfterMinutes', 'replyTimeoutMinutes']) {
       if (patch[key] === undefined) continue;
       const n = Number(patch[key]);
@@ -124,12 +172,36 @@ export class AttendanceService {
     return this.getSettings();
   }
 
+  /** Full WhatsApp config (server-side only). */
+  getWhatsAppConfig() {
+    const s = this.rawSettings();
+    return Object.fromEntries(WA_KEYS.map((k) => [k, s[`wa.${k}`] ?? '']));
+  }
+
+  /** WhatsApp config safe to show in the browser: secrets are reduced to "set / not set". */
+  getWhatsAppPublic() {
+    const c = this.getWhatsAppConfig();
+    return Object.fromEntries(WA_KEYS.map((k) => [k, WA_SECRET.has(k) ? Boolean(c[k]) : c[k]]));
+  }
+
+  updateWhatsAppConfig(patch = {}) {
+    for (const k of WA_KEYS) {
+      if (patch[k] === undefined || patch[k] === null) continue;
+      if (WA_SECRET.has(k) && patch[k] === true) continue; // "keep existing"
+      const v = String(patch[k]).trim();
+      if (v.length > 600) throw new HttpError(400, `${k} is too long`);
+      this.setSetting(`wa.${k}`, v);
+    }
+    this.changed();
+    return this.getWhatsAppPublic();
+  }
+
   // ----------------------------------------------------------------- batches
 
   listBatches() {
     return this.db
       .prepare(
-        `SELECT b.id, b.name, b.start_time AS startTime, b.days,
+        `SELECT b.id, b.name, b.start_time AS startTime, b.days, b.duration_minutes AS durationMinutes,
                 (SELECT COUNT(*) FROM students s WHERE s.batch_id = b.id AND s.active = 1) AS studentCount
            FROM batches b WHERE b.active = 1 ORDER BY b.start_time, b.name`,
       )
@@ -143,12 +215,12 @@ export class AttendanceService {
     return b;
   }
 
-  createBatch({ name, startTime, days = [1, 2, 3, 4, 5, 6] }) {
+  createBatch({ name, startTime, days = [1, 2, 3, 4, 5, 6], durationMinutes = 120 }) {
     const n = requireText(name, 'Batch name');
     if (!TIME_RE.test(String(startTime))) throw new HttpError(400, 'Start time must be HH:MM');
     const r = this.db
-      .prepare('INSERT INTO batches (name, start_time, days) VALUES (?, ?, ?)')
-      .run(n, startTime, parseDays(days));
+      .prepare('INSERT INTO batches (name, start_time, days, duration_minutes) VALUES (?, ?, ?, ?)')
+      .run(n, startTime, parseDays(days), parseDuration(durationMinutes));
     this.changed();
     return this.listBatches().find((b) => b.id === Number(r.lastInsertRowid));
   }
@@ -159,7 +231,10 @@ export class AttendanceService {
     const startTime = patch.startTime !== undefined ? patch.startTime : b.start_time;
     if (!TIME_RE.test(String(startTime))) throw new HttpError(400, 'Start time must be HH:MM');
     const days = patch.days !== undefined ? parseDays(patch.days) : b.days;
-    this.db.prepare('UPDATE batches SET name = ?, start_time = ?, days = ? WHERE id = ?').run(name, startTime, days, b.id);
+    const duration = patch.durationMinutes !== undefined ? parseDuration(patch.durationMinutes) : b.duration_minutes;
+    this.db
+      .prepare('UPDATE batches SET name = ?, start_time = ?, days = ?, duration_minutes = ? WHERE id = ?')
+      .run(name, startTime, days, duration, b.id);
     if (startTime !== b.start_time) {
       // Move today's session if it has not been verified yet.
       const date = this.today();
@@ -233,6 +308,7 @@ export class AttendanceService {
   }
 
   ensureTodaySessions() {
+    if (this.holidayOn(this.today())) return;
     const weekday = localWeekday(this.tz, this.clock());
     for (const b of this.db.prepare('SELECT * FROM batches WHERE active = 1').all()) {
       if (b.days.split(',').map(Number).includes(weekday)) this.ensureSession(b.id);
@@ -325,9 +401,13 @@ export class AttendanceService {
 
     const time = formatTime(this.tz, session.starts_at);
     const parentName = student.parent_name || 'Parent';
-    const text =
-      `Namaste ${parentName}, aaj ki ${batch.name} class (${time}) mein ${student.name} ki attendance record nahi hui. ` +
-      `Please confirm.`;
+    const text = renderTemplate(this.rawSettings().alertTemplate, {
+      parent: parentName,
+      student: student.name,
+      batch: batch.name,
+      time,
+      institute: this.rawSettings().instituteName,
+    });
     const buttons = Object.entries(REPLY_OPTIONS).map(([key, o]) => ({ id: `${key}:${alertId}`, title: o.title }));
 
     const msg = this.logMessage({ phone: student.parent_phone, direction: 'out', body: text, buttons, alertId });
@@ -489,6 +569,7 @@ export class AttendanceService {
       }
     }
     if (escalated) this.changed();
+    await this.maybeSendDigest();
   }
 
   // ----------------------------------------------------------------- views
@@ -575,6 +656,7 @@ export class AttendanceService {
       now: this.nowIso(),
       tz: this.tz,
       settings: this.getSettings(),
+      holiday: this.holidayOn(date),
       sessions: sessions.map((s) => this.getSessionView(s.id)),
       stats: this.getStats(date),
     };
@@ -638,6 +720,7 @@ export class AttendanceService {
   }
 
   listThreads() {
+    const owner = this.rawSettings().ownerPhone;
     return this.db
       .prepare(
         `SELECT t.phone, t.count, m.body AS lastBody, m.created_at AS lastAt,
@@ -647,7 +730,8 @@ export class AttendanceService {
            JOIN messages m ON m.id = t.lastId
           ORDER BY t.lastId DESC`,
       )
-      .all();
+      .all()
+      .map((t) => (t.phone === owner && !t.parentName ? { ...t, parentName: 'Owner · daily summary', isOwner: true } : t));
   }
 
   listMessages(phone) {
@@ -661,5 +745,388 @@ export class AttendanceService {
       )
       .all(p)
       .map((m) => ({ ...m, buttons: m.buttons ? JSON.parse(m.buttons) : null }));
+  }
+
+  // -------------------------------------------------------------- holidays
+
+  holidayOn(date) {
+    return this.db.prepare('SELECT label FROM holidays WHERE date = ?').get(date)?.label ?? null;
+  }
+
+  listHolidays() {
+    return this.db.prepare('SELECT date, label FROM holidays ORDER BY date').all();
+  }
+
+  addHoliday({ date, label }) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date))) throw new HttpError(400, 'Pick a date');
+    this.db
+      .prepare('INSERT INTO holidays (date, label) VALUES (?, ?) ON CONFLICT(date) DO UPDATE SET label = excluded.label')
+      .run(date, requireText(label, 'Holiday name', 60));
+    // A holiday added for today removes today's untouched sessions.
+    this.db
+      .prepare(
+        `DELETE FROM sessions WHERE date = ? AND verified_at IS NULL
+           AND NOT EXISTS (SELECT 1 FROM attendance a WHERE a.session_id = sessions.id)`,
+      )
+      .run(date);
+    this.changed();
+    return this.listHolidays();
+  }
+
+  deleteHoliday(date) {
+    this.db.prepare('DELETE FROM holidays WHERE date = ?').run(date);
+    this.changed();
+    return this.listHolidays();
+  }
+
+  // ------------------------------------------------------- student insights
+
+  /** Per-student attendance counts between two dates (inclusive). */
+  studentStats({ from, to, batchId = null, studentId = null }) {
+    const recentFrom = addDays(to, -(AT_RISK.recentDays - 1));
+    const rows = this.db
+      .prepare(
+        `SELECT st.id, st.name, st.batch_id AS batchId, b.name AS batchName,
+                st.parent_name AS parentName, st.parent_phone AS parentPhone,
+                COALESCE(SUM(x.status = 'P'), 0) AS P,
+                COALESCE(SUM(x.status = 'A'), 0) AS A,
+                COALESCE(SUM(x.status = 'L'), 0) AS L,
+                COALESCE(SUM(x.status = 'A' AND x.note LIKE 'Bunk%'), 0) AS bunks,
+                COUNT(x.status) AS total,
+                COALESCE(SUM(x.status = 'A' AND x.date >= ?), 0) AS recentAbsences
+           FROM students st
+           JOIN batches b ON b.id = st.batch_id
+           LEFT JOIN (SELECT a.student_id, a.status, a.note, se.date
+                        FROM attendance a JOIN sessions se ON se.id = a.session_id
+                       WHERE se.date BETWEEN ? AND ?) x ON x.student_id = st.id
+          WHERE st.active = 1 AND (? IS NULL OR st.batch_id = ?) AND (? IS NULL OR st.id = ?)
+          GROUP BY st.id
+          ORDER BY b.start_time, st.name`,
+      )
+      .all(recentFrom, from, to, batchId, batchId, studentId, studentId);
+    return rows.map((r) => {
+      const pct = r.total ? Math.round((r.P / r.total) * 100) : null;
+      const reasons = [];
+      if (pct !== null && r.total >= 5 && pct < AT_RISK.minPct) reasons.push(`${pct}% attendance`);
+      if (r.recentAbsences >= AT_RISK.recentAbsences) reasons.push(`${r.recentAbsences} absences in ${AT_RISK.recentDays} days`);
+      if (r.bunks >= 2) reasons.push(`${r.bunks} bunks`);
+      return { ...r, pct, atRisk: reasons.length > 0, riskReasons: reasons };
+    });
+  }
+
+  /** Student directory: everyone with their last-30-day attendance. */
+  getStudentDirectory({ batchId = null } = {}) {
+    const to = this.today();
+    return this.studentStats({ from: addDays(to, -29), to, batchId });
+  }
+
+  getStudentProfile(id) {
+    const st = this.db
+      .prepare(
+        `SELECT st.*, b.name AS batch_name, b.start_time FROM students st JOIN batches b ON b.id = st.batch_id
+          WHERE st.id = ? AND st.active = 1`,
+      )
+      .get(id);
+    if (!st) throw new HttpError(404, 'Student not found');
+    const today = this.today();
+    const from = addDays(today, -89);
+    const days = this.db
+      .prepare(
+        `SELECT se.date, a.status, a.note FROM attendance a JOIN sessions se ON se.id = a.session_id
+          WHERE a.student_id = ? AND se.date BETWEEN ? AND ? ORDER BY se.date`,
+      )
+      .all(st.id, from, today);
+    const holidays = this.db.prepare('SELECT date, label FROM holidays WHERE date BETWEEN ? AND ?').all(from, today);
+
+    let streak = 0;
+    for (const d of [...days].reverse()) {
+      if (d.status !== 'A') break;
+      streak++;
+    }
+    let presentStreak = 0;
+    for (const d of [...days].reverse()) {
+      if (d.status !== 'P') break;
+      presentStreak++;
+    }
+
+    const alerts = this.db
+      .prepare(
+        `SELECT al.id, al.status, al.sent_at AS sentAt, al.reply, al.replied_at AS repliedAt, al.escalated_at AS escalatedAt,
+                se.date, b.name AS batchName, t.outcome, t.status AS taskStatus
+           FROM alerts al JOIN sessions se ON se.id = al.session_id JOIN batches b ON b.id = se.batch_id
+           LEFT JOIN tasks t ON t.alert_id = al.id
+          WHERE al.student_id = ? ORDER BY al.sent_at DESC LIMIT 25`,
+      )
+      .all(st.id)
+      .map((a) => ({
+        ...a,
+        reply: a.reply ? REPLY_OPTIONS[a.reply]?.title ?? a.reply : null,
+        replyMinutes: a.repliedAt ? Math.round((Date.parse(a.repliedAt) - Date.parse(a.sentAt)) / 6000) / 10 : null,
+      }));
+
+    const [s30] = this.studentStats({ from: addDays(today, -29), to: today, studentId: st.id });
+    const [s90] = this.studentStats({ from, to: today, studentId: st.id });
+    return {
+      id: st.id,
+      name: st.name,
+      parentName: st.parent_name,
+      parentPhone: st.parent_phone,
+      batch: { id: st.batch_id, name: st.batch_name, startTime: st.start_time },
+      today,
+      from,
+      days,
+      holidays,
+      absentStreak: streak,
+      presentStreak,
+      stats30: s30,
+      stats90: s90,
+      alerts,
+    };
+  }
+
+  /**
+   * Bulk add students from CSV/TSV text: name, parent name, phone[, batch name].
+   * With dryRun nothing is saved; every row comes back with its problem, if any.
+   */
+  importStudents({ csv, batchId = null, dryRun = false }) {
+    const batches = this.listBatches();
+    const fallback = batchId ? batches.find((b) => b.id === Number(batchId)) : null;
+    const lines = String(csv ?? '')
+      .split(/\r?\n/)
+      .map((l, i) => ({ text: l.trim(), line: i + 1 }))
+      .filter((l) => l.text);
+    if (lines.length && /name/i.test(lines[0].text) && /phone|mobile|whatsapp/i.test(lines[0].text)) lines.shift();
+    if (lines.length > 1000) throw new HttpError(400, 'Import at most 1000 students at a time');
+
+    const rows = lines.map(({ text, line }) => {
+      const cols = text.split(text.includes('\t') ? '\t' : ',').map((c) => c.trim().replace(/^"|"$/g, ''));
+      const [name, parentName = '', phone = '', batchName = ''] = cols;
+      const row = { line, name, parentName, phone, batchName: batchName || fallback?.name || '', error: null };
+      const batch = batchName ? batches.find((b) => b.name.toLowerCase() === batchName.toLowerCase()) : fallback;
+      if (!name) row.error = 'Missing student name';
+      else if (!batch) row.error = batchName ? `No batch called "${batchName}"` : 'Pick a batch';
+      else {
+        const p = normalizePhone(phone);
+        if (p.length < 11 || p.length > 15) row.error = 'Invalid phone number';
+        else {
+          row.phone = p;
+          row.batchId = batch.id;
+          row.batchName = batch.name;
+        }
+      }
+      return row;
+    });
+
+    let added = 0;
+    if (!dryRun) {
+      const insert = this.db.prepare('INSERT INTO students (batch_id, name, parent_name, parent_phone) VALUES (?, ?, ?, ?)');
+      this.db.exec('BEGIN');
+      try {
+        for (const r of rows) {
+          if (r.error) continue;
+          insert.run(r.batchId, r.name.slice(0, 80), r.parentName.slice(0, 80) || null, r.phone);
+          added++;
+        }
+        this.db.exec('COMMIT');
+      } catch (err) {
+        this.db.exec('ROLLBACK');
+        throw err;
+      }
+      this.changed();
+    }
+    return { rows, added, valid: rows.filter((r) => !r.error).length };
+  }
+
+  // ---------------------------------------------------------------- reports
+
+  getReport({ from, to, batchId = null }) {
+    const today = this.today();
+    to = to && /^\d{4}-\d{2}-\d{2}$/.test(to) ? to : today;
+    from = from && /^\d{4}-\d{2}-\d{2}$/.test(from) ? from : addDays(to, -29);
+    if (from > to) [from, to] = [to, from];
+    if (daysBetween(from, to) > 366) throw new HttpError(400, 'Pick a range of at most one year');
+    const b = batchId ? Number(batchId) : null;
+
+    const daily = this.db
+      .prepare(
+        `SELECT se.date, SUM(a.status = 'P') AS P, SUM(a.status = 'A') AS A, SUM(a.status = 'L') AS L, COUNT(*) AS total
+           FROM attendance a JOIN sessions se ON se.id = a.session_id
+          WHERE se.date BETWEEN ? AND ? AND (? IS NULL OR se.batch_id = ?)
+          GROUP BY se.date ORDER BY se.date`,
+      )
+      .all(from, to, b, b);
+    const dailyMap = new Map(daily.map((d) => [d.date, d]));
+    const holidays = new Map(this.db.prepare('SELECT date, label FROM holidays WHERE date BETWEEN ? AND ?').all(from, to).map((h) => [h.date, h.label]));
+    const series = [];
+    for (let d = from; d <= to; d = addDays(d, 1)) {
+      const row = dailyMap.get(d);
+      series.push({
+        date: d,
+        P: row?.P ?? 0,
+        A: row?.A ?? 0,
+        L: row?.L ?? 0,
+        total: row?.total ?? 0,
+        pct: row?.total ? Math.round((row.P / row.total) * 100) : null,
+        holiday: holidays.get(d) ?? null,
+      });
+    }
+
+    const batches = this.db
+      .prepare(
+        `SELECT b.id, b.name, b.start_time AS startTime, COUNT(DISTINCT se.id) AS sessions,
+                COALESCE(SUM(a.status = 'P'), 0) AS P, COALESCE(SUM(a.status = 'A'), 0) AS A,
+                COALESCE(SUM(a.status = 'L'), 0) AS L, COUNT(a.status) AS total
+           FROM batches b
+           LEFT JOIN sessions se ON se.batch_id = b.id AND se.date BETWEEN ? AND ?
+           LEFT JOIN attendance a ON a.session_id = se.id
+          WHERE b.active = 1 AND (? IS NULL OR b.id = ?)
+          GROUP BY b.id ORDER BY b.start_time`,
+      )
+      .all(from, to, b, b)
+      .map((r) => ({ ...r, pct: r.total ? Math.round((r.P / r.total) * 100) : null }));
+
+    const al = this.db
+      .prepare(
+        `SELECT COUNT(*) AS sent,
+                COALESCE(SUM(al.status = 'replied'), 0) AS replied,
+                COALESCE(SUM(al.status IN ('escalated', 'failed')), 0) AS escalated,
+                AVG(CASE WHEN al.replied_at IS NOT NULL THEN (julianday(al.replied_at) - julianday(al.sent_at)) * 1440 END) AS avgReplyMin,
+                AVG((julianday(al.sent_at) - julianday(se.starts_at)) * 1440) AS avgMinToAlert,
+                AVG((julianday(se.starts_at) - julianday(al.sent_at)) * 1440 + b.duration_minutes) AS avgMinBeforeClassEnd
+           FROM alerts al JOIN sessions se ON se.id = al.session_id JOIN batches b ON b.id = se.batch_id
+          WHERE se.date BETWEEN ? AND ? AND (? IS NULL OR se.batch_id = ?)`,
+      )
+      .get(from, to, b, b);
+    const calls = this.db
+      .prepare(
+        `SELECT COUNT(*) AS total, COALESCE(SUM(t.status = 'done'), 0) AS done,
+                COALESCE(SUM(t.outcome LIKE 'Bunk%'), 0) AS bunks,
+                COALESCE(SUM(t.outcome LIKE 'Parent unreachable%'), 0) AS unreachable
+           FROM tasks t JOIN alerts al ON al.id = t.alert_id JOIN sessions se ON se.id = al.session_id
+          WHERE se.date BETWEEN ? AND ? AND (? IS NULL OR se.batch_id = ?)`,
+      )
+      .get(from, to, b, b);
+
+    const students = this.studentStats({ from, to, batchId: b });
+    const totals = series.reduce((t, d) => ({ P: t.P + d.P, A: t.A + d.A, L: t.L + d.L, total: t.total + d.total }), { P: 0, A: 0, L: 0, total: 0 });
+    const round1 = (v) => (v == null ? null : Math.round(v * 10) / 10);
+    return {
+      from,
+      to,
+      batchId: b,
+      totals: { ...totals, pct: totals.total ? Math.round((totals.P / totals.total) * 100) : null },
+      series,
+      batches,
+      alerts: {
+        sent: al.sent,
+        replied: al.replied,
+        escalated: al.escalated,
+        replyRate: al.sent ? Math.round((al.replied / al.sent) * 100) : null,
+        avgReplyMin: round1(al.avgReplyMin),
+        avgMinToAlert: round1(al.avgMinToAlert),
+        avgMinBeforeClassEnd: al.avgMinBeforeClassEnd == null ? null : Math.round(al.avgMinBeforeClassEnd),
+      },
+      calls,
+      students,
+      atRisk: students.filter((s) => s.atRisk),
+    };
+  }
+
+  // ------------------------------------------------------- timeline, feed
+
+  /** The story of one class, step by step (what the reel animates). */
+  getTimeline(sessionId) {
+    const s = this.db
+      .prepare('SELECT se.*, b.name AS batch_name FROM sessions se JOIN batches b ON b.id = se.batch_id WHERE se.id = ?')
+      .get(sessionId);
+    if (!s) throw new HttpError(404, 'Session not found');
+    const nowIso = this.nowIso();
+    const ev = [];
+    const push = (at, kind, text, extra = {}) => at && at <= nowIso && ev.push({ at, kind, text, sessionId: s.id, batch: s.batch_name, ...extra });
+
+    push(s.starts_at, 'start', 'Class started');
+    const marks = this.db
+      .prepare(
+        `SELECT MIN(updated_at) AS first, MAX(updated_at) AS last, COUNT(*) AS n
+           FROM attendance WHERE session_id = ? AND source = 'teacher'`,
+      )
+      .get(s.id);
+    if (marks.n) push(marks.last, 'mark', `Teacher marked ${marks.n} student${marks.n === 1 ? '' : 's'}`);
+    if (s.verified_at) {
+      const c = this.db
+        .prepare(`SELECT SUM(status = 'P') AS P, SUM(status = 'A') AS A, SUM(status = 'L') AS L FROM attendance WHERE session_id = ?`)
+        .get(s.id);
+      push(s.verified_at, 'verify', `Verified: ${c.P ?? 0} present, ${c.A ?? 0} absent, ${c.L ?? 0} leave/late`);
+    }
+    const alerts = this.db
+      .prepare(
+        `SELECT al.*, st.name, st.parent_name, t.done_at, t.outcome FROM alerts al
+           JOIN students st ON st.id = al.student_id LEFT JOIN tasks t ON t.alert_id = al.id
+          WHERE al.session_id = ?`,
+      )
+      .all(s.id);
+    for (const a of alerts) {
+      const parent = a.parent_name || 'Parent';
+      const who = { studentId: a.student_id, student: a.name };
+      push(a.sent_at, a.status === 'failed' ? 'fail' : 'alert', a.status === 'failed' ? `WhatsApp to ${parent} failed (${a.name})` : `WhatsApp sent to ${parent} about ${a.name}`, who);
+      if (a.replied_at) push(a.replied_at, 'reply', `${parent} replied: ${REPLY_OPTIONS[a.reply]?.title ?? a.reply}`, who);
+      if (a.escalated_at) push(a.escalated_at, 'escalate', `No reply from ${parent}: call task created`, who);
+      if (a.done_at) push(a.done_at, 'call', `Staff called about ${a.name}: ${a.outcome}`, who);
+    }
+    return ev.sort((x, y) => (x.at < y.at ? -1 : x.at > y.at ? 1 : 0));
+  }
+
+  /** Latest events across today's classes. */
+  getActivity(limit = 15) {
+    const ids = this.db.prepare('SELECT id FROM sessions WHERE date = ?').all(this.today());
+    return ids
+      .flatMap((r) => this.getTimeline(r.id))
+      .sort((x, y) => (x.at < y.at ? 1 : x.at > y.at ? -1 : 0))
+      .slice(0, limit);
+  }
+
+  // ------------------------------------------------------- daily digest
+
+  buildDigest(date = this.today()) {
+    const st = this.getStats(date);
+    const name = this.rawSettings().instituteName;
+    const label = new Intl.DateTimeFormat('en-IN', { day: 'numeric', month: 'short', timeZone: 'UTC' }).format(new Date(`${date}T00:00:00Z`));
+    const risk = this.getStudentDirectory().filter((s) => s.atRisk).slice(0, 5);
+    const calls = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(t.status = 'done'), 0) AS done, COALESCE(SUM(t.status = 'open'), 0) AS open,
+                COALESCE(SUM(t.outcome LIKE 'Bunk%'), 0) AS bunks
+           FROM tasks t JOIN alerts al ON al.id = t.alert_id JOIN sessions se ON se.id = al.session_id WHERE se.date = ?`,
+      )
+      .get(date);
+    const lines = [
+      `📋 ${name}: summary for ${label}`,
+      `✅ Present ${st.present} · ❌ Absent ${st.absent} · 🕒 Leave/late ${st.leaveLate}`,
+      `💬 WhatsApp alerts ${st.alertsSent} (${st.replied} replied)`,
+      `📞 Calls ${calls.done} done${calls.open ? `, ${calls.open} pending` : ''}${calls.bunks ? ` · ${calls.bunks} bunk${calls.bunks > 1 ? 's' : ''} caught` : ''}`,
+    ];
+    if (st.avgMinutesToAlert != null) lines.push(`⏱ Parents informed ${st.avgMinutesToAlert} min after class start`);
+    if (risk.length) lines.push(`⚠️ Needs attention: ${risk.map((r) => `${r.name} (${r.batchName})`).join(', ')}`);
+    return lines.join('\n');
+  }
+
+  async maybeSendDigest({ force = false } = {}) {
+    const s = this.rawSettings();
+    const today = this.today();
+    if (!force) {
+      if (s.digestEnabled !== '1' || !s.ownerPhone || s.lastDigestDate === today) return false;
+      if (localTime(this.tz, this.clock()) < s.digestTime) return false;
+    }
+    if (!s.ownerPhone) throw new HttpError(400, "Add the owner's WhatsApp number first");
+    this.setSetting('lastDigestDate', today);
+    const text = this.buildDigest(today);
+    const msg = this.logMessage({ phone: s.ownerPhone, direction: 'out', body: text });
+    try {
+      await this.messenger.send({ to: s.ownerPhone, text });
+    } catch (err) {
+      this.db.prepare('UPDATE messages SET error = ? WHERE id = ?').run(err.message, msg);
+    }
+    this.changed();
+    return true;
   }
 }

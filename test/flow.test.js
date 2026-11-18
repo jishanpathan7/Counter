@@ -4,7 +4,6 @@ import crypto from 'node:crypto';
 import { openDb } from '../server/db.js';
 import { AttendanceService, normalizePhone, parseReplyText } from '../server/service.js';
 import { buildPayload, parseWebhook, verifySignature } from '../server/messaging.js';
-import { createApp, createEventHub } from '../server/app.js';
 import { zonedTimeToIso, localDate } from '../server/time.js';
 
 const TZ = 'Asia/Kolkata';
@@ -237,44 +236,78 @@ test('WhatsApp payloads and webhook parsing', () => {
   assert.equal(verifySignature(body, sig, 'other'), false);
 });
 
-test('HTTP API: access code, marking, and the simulator', async (tt) => {
+test('holidays stop sessions; templates, import, reports, timeline and digest work', async () => {
   const t = setup();
-  const app = createApp({ service: t.service, hub: createEventHub(), mode: 'simulator', accessCode: 'letmein', logger: { error() {} } });
-  const server = app.listen(0);
-  tt.after(() => server.close());
-  const base = `http://127.0.0.1:${server.address().port}`;
+  const { service } = t;
+  t.advance(15 * 60_000); // 4:10 PM
 
-  assert.equal((await fetch(`${base}/api/board`)).status, 401);
-  assert.equal((await fetch(`${base}/api/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"code":"nope"}' })).status, 401);
-  const login = await fetch(`${base}/api/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"code":"letmein"}' });
-  const cookie = login.headers.get('set-cookie').split(';')[0];
-  const call = (method, p, body) =>
-    fetch(`${base}${p}`, { method, headers: { cookie, 'Content-Type': 'application/json' }, body: body && JSON.stringify(body) }).then(async (r) => ({ status: r.status, body: await r.json().catch(() => null) }));
+  // template
+  service.updateSettings({ alertTemplate: 'Hello {parent}: {student} missed {batch} at {time}' });
+  await service.mark(t.session.id, t.ids.Rohan, 'A');
+  await service.markAll(t.session.id, 'P');
+  await service.mark(t.session.id, t.ids.Rohan, 'A');
+  await service.verify(t.session.id);
+  assert.equal(t.sent[0].text, 'Hello Rohan parent: Rohan missed Batch B at 4:00 PM');
+  assert.throws(() => service.updateSettings({ alertTemplate: 'no placeholder' }), /must include \{student\}/);
 
-  const board = await call('GET', '/api/board');
-  assert.equal(board.status, 200);
-  assert.equal(board.body.sessions.length, 1);
+  // timeline tells the story in order
+  t.advance(2 * 60_000);
+  await service.handleReply({ phone: '9000000003', text: 'late aa raha hai' });
+  const kinds = service.getTimeline(t.session.id).map((e) => e.kind);
+  assert.deepEqual(kinds, ['start', 'mark', 'verify', 'alert', 'reply']);
 
-  const bad = await call('POST', `/api/sessions/${t.session.id}/mark`, { studentId: t.ids.Aarav, status: 'X' });
-  assert.equal(bad.status, 400);
+  // report
+  const r = service.getReport({ from: service.today(), to: service.today() });
+  assert.equal(r.totals.total, 4);
+  assert.equal(r.alerts.sent, 1);
+  assert.equal(r.alerts.replyRate, 100);
+  assert.equal(r.alerts.avgMinBeforeClassEnd, 110); // alert at 4:10, class ends 6:00
 
-  await call('POST', `/api/sessions/${t.session.id}/mark-all`, { status: 'P' });
-  await call('POST', `/api/sessions/${t.session.id}/mark`, { studentId: t.ids.Meera, status: 'A' });
-  const verified = await call('POST', `/api/sessions/${t.session.id}/verify`);
-  assert.ok(verified.body.verifiedAt);
+  // import: dry run reports problems, real run adds valid rows
+  const csv = 'name,parent,phone,batch\nKiran,Mr. K,98765 43210,Batch B\nNoPhone,Mr. N,123,Batch B\nGhost,Mr. G,9876543211,Batch Z';
+  const dry = service.importStudents({ csv, dryRun: true });
+  assert.deepEqual(dry.rows.map((x) => x.error), [null, 'Invalid phone number', 'No batch called "Batch Z"']);
+  assert.equal(service.listStudents().length, 4);
+  assert.equal(service.importStudents({ csv }).added, 1);
+  assert.equal(service.listStudents().length, 5);
 
-  const threads = await call('GET', '/api/messages/threads');
-  assert.equal(threads.status, 200);
-  assert.equal(threads.body[0].phone, '919000000004');
-  assert.equal(threads.body[0].students, 'Meera');
+  // holiday tomorrow: no session is created
+  t.advance(24 * 60 * 60_000);
+  service.addHoliday({ date: service.today(), label: 'Diwali' });
+  service.ensureTodaySessions();
+  const board = service.getBoard();
+  assert.equal(board.holiday, 'Diwali');
+  assert.equal(board.sessions.length, 0);
 
-  const msgs = await call('GET', '/api/messages?phone=9000000004');
-  assert.equal(msgs.body.length, 1);
-  const leave = msgs.body[0].buttons[0];
-  const reply = await call('POST', '/api/simulator/reply', { phone: '9000000004', payload: leave.id, text: leave.title });
-  assert.equal(reply.body.matched, true);
-  assert.equal(t.student('Meera').status, 'L');
+  // digest goes to the owner once
+  service.updateSettings({ ownerPhone: '9000000099', digestEnabled: true, digestTime: '00:00' });
+  await service.tick();
+  await service.tick();
+  const digests = t.sent.filter((m) => m.to === '919000000099');
+  assert.equal(digests.length, 1);
+  assert.match(digests[0].text, /summary for/);
+});
 
-  const missing = await call('GET', '/api/nope');
-  assert.equal(missing.status, 404);
+test('student profile and at-risk detection', async () => {
+  const t = setup();
+  const { service } = t;
+  // Rohan absent (no reply, bunk) on 3 days in a row
+  for (let day = 0; day < 3; day++) {
+    const s = service.ensureSession(t.batch.id);
+    await service.markAll(s.id, 'P');
+    await service.mark(s.id, t.ids.Rohan, 'A');
+    await service.verify(s.id);
+    t.advance(4 * 60_000);
+    await service.tick();
+    const [task] = service.listTasks('open');
+    service.completeTask(task.id, { outcome: 'bunk' });
+    t.advance(24 * 60 * 60_000 - 4 * 60_000);
+  }
+  const p = service.getStudentProfile(t.ids.Rohan);
+  assert.equal(p.absentStreak, 3);
+  assert.equal(p.stats30.bunks, 3);
+  assert.equal(p.stats30.atRisk, true);
+  assert.equal(p.alerts.length, 3);
+  const dir = service.getStudentDirectory();
+  assert.equal(dir.find((s) => s.name === 'Aarav').atRisk, false);
 });

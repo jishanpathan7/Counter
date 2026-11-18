@@ -78,3 +78,20 @@ export function formatTime(tz, iso) {
     .format(new Date(iso))
     .toUpperCase();
 }
+
+/** 'YYYY-MM-DD' shifted by n days (calendar arithmetic, no time zone involved). */
+export function addDays(date, n) {
+  const [y, m, d] = date.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
+}
+
+/** 'HH:MM' wall-clock time in the time zone. */
+export function localTime(tz, ts) {
+  const p = zonedParts(tz, ts);
+  return `${String(p.hour).padStart(2, '0')}:${String(p.minute).padStart(2, '0')}`;
+}
+
+/** Whole days from a to b ('YYYY-MM-DD'). */
+export function daysBetween(a, b) {
+  return Math.round((Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / 86_400_000);
+}

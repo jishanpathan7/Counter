@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 
-async function request(method, path, body) {
-  const res = await fetch(`/api${path}`, {
+export async function request(method, url, body) {
+  const res = await fetch(url, {
     method,
     credentials: 'same-origin',
     headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
@@ -16,45 +16,75 @@ async function request(method, path, body) {
   return data;
 }
 
-export const api = {
-  get: (p) => request('GET', p),
-  post: (p, b = {}) => request('POST', p, b),
-  patch: (p, b) => request('PATCH', p, b),
-  del: (p) => request('DELETE', p),
-};
-
-/** Bumps whenever the server says data changed (server-sent events). */
-export const LiveContext = createContext({ version: 0, info: null, toast: () => {} });
-
-export function useLive() {
-  return useContext(LiveContext);
+function client(base = '') {
+  return {
+    base,
+    get: (p) => request('GET', base + p),
+    post: (p, b = {}) => request('POST', base + p, b),
+    patch: (p, b = {}) => request('PATCH', base + p, b),
+    del: (p) => request('DELETE', base + p),
+  };
 }
 
-/** Fetch `path` and refetch whenever live data changes. */
+/** Calls under /api (auth, agency). */
+export const api = client('/api');
+/** Calls for one institute. */
+export const instApi = (slug) => client(`/api/i/${slug}`);
+
+// ------------------------------------------------------------------ routing
+
+export function navigate(path) {
+  if (window.location.pathname + window.location.hash === path) return;
+  window.history.pushState({}, '', path);
+  window.dispatchEvent(new PopStateEvent('popstate'));
+}
+
+export function useLocation() {
+  const read = () => ({ path: window.location.pathname, hash: window.location.hash.replace(/^#\/?/, '') });
+  const [loc, setLoc] = useState(read);
+  useEffect(() => {
+    const on = () => setLoc(read());
+    window.addEventListener('popstate', on);
+    window.addEventListener('hashchange', on);
+    return () => {
+      window.removeEventListener('popstate', on);
+      window.removeEventListener('hashchange', on);
+    };
+  }, []);
+  return loc;
+}
+
+// ------------------------------------------------------------------ live context
+
+/** Shared by every screen inside an institute. */
+export const AppContext = createContext(null);
+export const useApp = () => useContext(AppContext);
+
+/** Fetch an institute path; refetch whenever the server says data changed. */
 export function useData(path) {
-  const { version } = useLive();
+  const { version, api: a } = useApp();
   const [state, setState] = useState({ data: null, error: null, loading: true });
-  const pathRef = useRef(path);
-  pathRef.current = path;
+  const current = useRef(path);
+  current.current = path;
 
   const reload = useCallback(async () => {
     if (!path) return;
     try {
-      const data = await api.get(path);
-      if (pathRef.current === path) setState({ data, error: null, loading: false });
+      const data = await a.get(path);
+      if (current.current === path) setState({ data, error: null, loading: false });
     } catch (error) {
-      if (pathRef.current === path) setState((s) => ({ ...s, error, loading: false }));
+      if (current.current === path) setState((s) => ({ ...s, error, loading: false }));
     }
-  }, [path]);
+  }, [path, a]);
 
   useEffect(() => {
     reload();
   }, [reload, version]);
 
-  return { ...state, reload, setData: (data) => setState((s) => ({ ...s, data })) };
+  return { ...state, reload };
 }
 
-/** Current time, re-rendering every second (for countdowns). */
+/** Current time, re-rendering on an interval (for countdowns). */
 export function useNow(intervalMs = 1000) {
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
@@ -63,6 +93,8 @@ export function useNow(intervalMs = 1000) {
   }, [intervalMs]);
   return now;
 }
+
+// ------------------------------------------------------------------ formatting
 
 let defaultTz;
 /** Show times in the institute's time zone, wherever the viewer is. */
@@ -77,6 +109,11 @@ export function fmtTime(iso, tz) {
     .toUpperCase();
 }
 
+export function fmtDate(date, opts = { day: 'numeric', month: 'short' }) {
+  if (!date) return '';
+  return new Intl.DateTimeFormat('en-IN', { ...opts, timeZone: 'UTC' }).format(new Date(`${date}T00:00:00Z`));
+}
+
 export function fmtCountdown(ms) {
   const s = Math.max(0, Math.ceil(ms / 1000));
   const h = Math.floor(s / 3600);
@@ -85,13 +122,47 @@ export function fmtCountdown(ms) {
   return h ? `${h}:${String(m).padStart(2, '0')}:${sec}` : `${m}:${sec}`;
 }
 
+export function fmtAgo(iso, now = Date.now()) {
+  if (!iso) return 'never';
+  const m = Math.round((now - Date.parse(iso)) / 60000);
+  if (m < 1) return 'just now';
+  if (m < 60) return `${m} min ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h} h ago`;
+  return `${Math.round(h / 24)} d ago`;
+}
+
+export function fmtDuration(min) {
+  if (min == null) return '–';
+  const m = Math.round(min);
+  if (m < 60) return `${m} min`;
+  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`;
+}
+
 export function fmtPhone(p = '') {
   if (p.startsWith('91') && p.length === 12) return `+91 ${p.slice(2, 7)} ${p.slice(7)}`;
-  return `+${p}`;
+  return p ? `+${p}` : '';
 }
 
 export function fmtTime24(t) {
+  if (!t) return '';
   const [h, m] = t.split(':').map(Number);
-  const suffix = h >= 12 ? 'PM' : 'AM';
-  return `${((h + 11) % 12) + 1}:${String(m).padStart(2, '0')} ${suffix}`;
+  return `${((h + 11) % 12) + 1}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
+}
+
+export function fmtMoney(n) {
+  return `₹${Number(n || 0).toLocaleString('en-IN')}`;
+}
+
+export function initials(name = '') {
+  const parts = name.replace(/^(Mr|Mrs|Ms|Dr)\.?\s+/i, '').trim().split(/\s+/);
+  return ((parts[0]?.[0] ?? '') + (parts[1]?.[0] ?? '')).toUpperCase() || '?';
+}
+
+/** Stable pleasant colour per name, for avatars. */
+export function colorFor(name = '') {
+  const palette = ['#2e7d4f', '#1769aa', '#8e44ad', '#c0392b', '#d35400', '#16a085', '#2c3e50', '#7d5a2e'];
+  let h = 0;
+  for (const c of name) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  return palette[h % palette.length];
 }

@@ -1,30 +1,58 @@
 # Attendance Alert
 
-Attendance automation for coaching institutes. When a student is absent, their parent finds out on
-WhatsApp within minutes of class starting, instead of at 6 PM when class is over.
+Attendance automation for coaching institutes, built to be sold to many of them.
 
-## How it works
+When a student is absent, their parent finds out on WhatsApp **within minutes of class starting**,
+instead of at 6 PM when class is over. Parents reply with one tap, the register updates itself, and
+parents who don't reply land on the front desk's call list.
 
-1. **Teacher marks attendance** on their phone (P / A / L).
-2. **Auto-verify**: 10 minutes after class starts, absentees are confirmed. Anyone left unmarked
-   counts as absent.
-3. **Parent gets a WhatsApp alert**: *"Aaj ki class mein Rohan ki attendance record nahi hui. Please
-   confirm."* with two buttons: **Leave** and **Late 15 min**.
-4. **Parent replies** by tapping a button, or by typing something like "aaj chutti hai".
-5. **Register updates itself**: the student goes from A to L, with the reason.
-6. **No reply in 3 minutes?** The parent goes on the **Call tasks** list. Staff call them and log
-   the outcome: leave, late, present, bunk, or unreachable.
+## The flow
 
-The dashboard shows every batch live and how quickly parents were informed.
+1. **The teacher takes attendance** on their phone (P / A / L).
+2. **Absentees are verified automatically** 10 minutes after class starts.
+3. **The parent gets a WhatsApp message** with two buttons: **Leave** and **Late 15 min**.
+4. **The parent replies**, by tapping a button or typing something like "aaj chutti hai".
+5. **The record updates itself**: absent becomes leave/late, with the reason.
+6. **No reply in 3 minutes?** It becomes a call task. Staff call and log the outcome: leave, late,
+   present, bunk or unreachable.
 
-Built-in safeguards:
-- Parents are never messaged for a class where the teacher took no attendance. The dashboard
-  flags it as "Attendance not taken". This prevents messaging a whole batch if the system is
-  installed, or a batch is added, after class time.
+## What's in the app
+
+| Area | What it does |
+| --- | --- |
+| **Agency console** | Every institute you run in one place: monthly revenue, students covered, alerts sent, 7-day attendance trend. Add an institute with its owner's login in one form; pause or resume an institute (no logins, no messages). |
+| **Dashboard** | Today's six steps as a live funnel, an impact card ("parents hear within 10 min, 1h 40m before class ends"), live class cards with a step-by-step timeline, an activity feed and students who need attention. Updates live. |
+| **Take attendance** | Big P / A / L buttons, progress bar and "mark all present". Teachers see only their own batches and never see parents' numbers. |
+| **Students** | Search, filter and sort by 30-day attendance. At-risk flags: under 75%, 3+ absences in 14 days, or repeated bunks. Profile with a 90-day calendar, streaks, every WhatsApp alert and reply, and one-tap call / WhatsApp. |
+| **CSV import** | Paste from Excel or upload a CSV. A preview flags bad phone numbers and unknown batches before anything is saved. |
+| **Call tasks** | Tap to call, add a note, log the outcome; the register updates itself. |
+| **WhatsApp** | Every message in and out. Until a WhatsApp account is connected, a phone-style simulator lets you reply as the parent. |
+| **Reports** | 7 / 30 / 90 days, this month or a custom range, by batch. Daily chart, batch and student tables, reply rate, average reply time, bunks caught. CSV export. |
+| **Settings** | Class timers, batches (time, length, days), holidays (no classes, no alerts), team and roles, the alert message editor with live preview (Hinglish, English, हिंदी), WhatsApp Cloud API connection, owner's daily summary, PIN change. |
+
+Also included: phone + PIN login with lockout after repeated wrong PINs, four roles (agency admin,
+owner, front desk, teacher), a first-run setup wizard, dark mode, and installability as a phone app
+(PWA).
+
+### Roles
+
+| | Agency admin | Owner | Front desk | Teacher |
+| --- | :-: | :-: | :-: | :-: |
+| Agency console, add / pause institutes | ✓ | | | |
+| Settings, team, WhatsApp, import | ✓ | ✓ | | |
+| Dashboard, students, calls, WhatsApp, reports | ✓ | ✓ | ✓ | |
+| Take attendance | ✓ | ✓ | ✓ | own batches |
+
+### Safeguards
+
+- Parents are never messaged for a class where no attendance was taken. This protects against a
+  new install, or a batch added after class time, messaging a whole batch.
 - If the teacher is still marking at verify time, verification waits until everyone is marked or
-  they have stopped for 90 seconds.
-- Each student gets at most one alert per class. A parent can only answer their own child's alert.
-- If a WhatsApp message fails to send, it goes straight to the call list.
+  they have paused for 90 seconds.
+- Each student gets at most one alert per class, and a parent can only answer for their own child.
+- Failed WhatsApp sends go straight to the call list. Holidays send nothing.
+- Each institute has its own database file, so their data never mixes. WhatsApp tokens never
+  reach the browser.
 
 ## Run it
 
@@ -32,61 +60,73 @@ Needs Node.js 22.13 or newer.
 
 ```bash
 npm install
-npm run dev        # API on :3001, app on http://localhost:5173
+npm run dev          # API on :3001, app on http://localhost:5173
 ```
 
-It starts with demo batches (Batch B: Aarav, Diya, Rohan, Meera) and the **WhatsApp simulator**.
-Alerts appear on the **WhatsApp** tab, where you can tap reply buttons as the parent.
+The first start creates a **demo workspace**: an agency running three institutes, with a month of
+attendance history. The login screen has one-tap buttons for each role (PIN `1234`):
 
-**Quick demo:** in **Setup**, set both timers to `0.5` minutes. On the **Dashboard**, press
-**Start class now** on a batch. Mark students on the **Teacher** tab, then watch alerts go out,
-reply on the **WhatsApp** tab, and wait for the call task.
+| Role | Mobile |
+| --- | --- |
+| Agency admin | 99999 00000 |
+| Institute owner (Bright Future Classes) | 99999 00001 |
+| Front desk | 99999 00002 |
+| Teacher (Batch B, JEE) | 99999 00003 |
+
+Today's **Class 10 · Batch B** is left open, so you can try the live flow at any time of day:
+
+1. Log in as the owner. In Settings → General, set both timers to `0.2` minutes.
+2. On the Dashboard, press **Start class now** on Batch B.
+3. Mark a couple of students absent (on your phone, log in as the teacher).
+4. Within seconds parents are alerted. Reply as one parent on the **WhatsApp** tab, leave the other
+   one silent, and watch the call task appear.
 
 Production:
 
 ```bash
-npm run build      # builds the app into dist/
-npm start          # serves the API and the app on PORT (default 3001)
-npm test           # runs the server tests
+SEED_DEMO=false npm run build && SEED_DEMO=false npm start   # serves API + app on PORT
+npm test                                                     # 20 server and API tests
 ```
 
-Configuration is in `.env` (copy `.env.example`). Set `ACCESS_CODE` before putting the app online:
-it holds children's names and parents' phone numbers.
+With `SEED_DEMO=false`, a fresh install opens a setup wizard where you create your account and first
+institute. Data lives in `DATA_DIR` (default `data/`): `platform.db` holds users and institutes, and
+`institutes/<name>.db` holds each institute's data. Back up that folder.
 
 ## Connecting real WhatsApp
 
-Uses the [Meta WhatsApp Cloud API](https://developers.facebook.com/docs/whatsapp/cloud-api).
+Each institute connects its own WhatsApp Business number in **Settings → WhatsApp & message**.
 
-1. Create a Meta app with the WhatsApp product and get a **phone number ID** and a **permanent
-   access token**. Put them in `WHATSAPP_PHONE_NUMBER_ID` and `WHATSAPP_TOKEN`.
-2. Create a message template, for example named `attendance_alert`, category *Utility*:
+1. In Meta's developer dashboard, add the WhatsApp product. Copy the **phone number ID** and a
+   **permanent access token** into the form.
+2. Create a message template, for example `attendance_alert`, category *Utility*:
    - Body: `Namaste {{1}}, aaj ki {{2}} class ({{3}}) mein {{4}} ki attendance record nahi hui. Please confirm.`
-     (`{{1}}` parent name, `{{2}}` batch, `{{3}}` class time, `{{4}}` student name)
-   - Buttons: two **Quick reply** buttons, `Leave` and `Late 15 min`, in that order.
+     (`{{1}}` parent, `{{2}}` batch, `{{3}}` time, `{{4}}` student)
+   - Two **Quick reply** buttons, in this order: `Leave`, `Late 15 min`.
 
-   Once it is approved, set `WHATSAPP_TEMPLATE=attendance_alert` (and `WHATSAPP_TEMPLATE_LANG` to
-   the template's language code). Without a template, WhatsApp only delivers alerts to parents who
-   messaged you in the last 24 hours.
-3. Webhook: point Meta at `https://<your-server>/webhooks/whatsapp`, enter the same value you put in
-   `WHATSAPP_VERIFY_TOKEN`, and subscribe to **messages**. Set `WHATSAPP_APP_SECRET` so incoming
+   Once it's approved, enter its name and language. Without an approved template, WhatsApp only
+   delivers alerts to parents who messaged you in the last 24 hours.
+3. Webhook: paste the **callback URL** shown in the form (`/webhooks/whatsapp/<institute>`) into
+   Meta along with your verify token, subscribe to **messages**, and add the app secret so incoming
    webhooks are signature-checked.
-
-Once `WHATSAPP_TOKEN` and `WHATSAPP_PHONE_NUMBER_ID` are set, the simulator turns off and the
-WhatsApp tab becomes a log of real messages.
 
 ## Code layout
 
 ```
 server/
   index.js      starts the server and the scheduler (reads .env)
-  app.js        HTTP API, WhatsApp webhook, access code, live updates (server-sent events)
-  service.js    the attendance flow: marking, verify, alerts, replies, escalation, call tasks
+  platform.js   users, PIN login, institutes, memberships, agency overview
+  app.js        HTTP API with role checks, WhatsApp webhooks, live updates (server-sent events)
+  service.js    one institute: marking, verify, alerts, replies, escalation, calls,
+                holidays, student insights, import, reports, timeline, daily summary
   messaging.js  WhatsApp Cloud API client, webhook parsing, simulator
-  db.js         SQLite schema (Node's built-in node:sqlite)
-  time.js       institute time-zone helpers
-  seed.js       demo data
-web/src/        React app: Dashboard, Teacher, Call tasks, WhatsApp, Setup
-test/           end-to-end flow tests (node --test)
+  db.js         institute database schema (Node's built-in node:sqlite)
+  seed.js       demo workspace with realistic history
+  time.js       time-zone helpers
+web/src/
+  App.jsx       routing, institute shell, sidebar / mobile tab bar
+  views/        Auth (login, setup wizard), Agency, Dashboard, Teacher, Students,
+                Tasks, Messages, Reports, Settings
+  ui.jsx        icons, pills, modal, drawer, theme;  charts.jsx  trend chart, heatmap, sparkline
+web/public/     PWA manifest, icons, service worker
+test/           service flow tests and HTTP/role tests (node --test)
 ```
-
-Data lives in one SQLite file (`data/attendance.db` by default). Back it up like any other file.

@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { api, fmtPhone, fmtTime, useData, useLive } from '../api.js';
-import { Empty } from '../components.jsx';
+import { fmtPhone, fmtTime, initials, useApp, useData } from '../api.js';
+import { Empty, Icon, Loading } from '../ui.jsx';
 
 export default function Messages() {
-  const { info, toast } = useLive();
+  const { info, api, toast } = useApp();
   const simulator = info.mode === 'simulator';
   const { data: threads } = useData('/messages/threads');
   const [phone, setPhone] = useState(null);
@@ -30,34 +30,36 @@ export default function Messages() {
   };
 
   const thread = threads?.find((t) => t.phone === phone);
-  const lastOutWithButtons = messages ? [...messages].reverse().find((m) => m.direction === 'out' && m.buttons) : null;
+  const lastWithButtons = messages ? [...messages].reverse().find((m) => m.direction === 'out' && m.buttons) : null;
 
   return (
-    <div className="stack">
+    <div>
       <div className="page-head">
         <div>
-          <h1>{simulator ? 'Parent WhatsApp' : 'WhatsApp log'}</h1>
+          <h1>{simulator ? 'WhatsApp simulator' : 'WhatsApp'}</h1>
           <p className="muted">
             {simulator
-              ? 'Simulator: no WhatsApp account is connected, so alerts land here. Tap a reply button as the parent to watch the register update.'
+              ? 'No WhatsApp account is connected yet, so messages land here. Tap a reply button as the parent and watch the register update.'
               : 'Every alert sent and reply received through the WhatsApp Cloud API.'}
           </p>
         </div>
+        {simulator && info.role === 'owner' && <a className="btn ghost" href="#/settings/whatsapp"><Icon name="wifi" /> Connect WhatsApp</a>}
       </div>
 
+      {!threads && <Loading height={300} />}
       {threads && !threads.length && (
-        <Empty title="No messages yet">Alerts appear here once a class is verified and someone is absent.</Empty>
+        <Empty title="No messages yet" icon="chat">Alerts appear here once a class is verified and someone is absent.</Empty>
       )}
 
       {threads?.length > 0 && (
         <div className="wa-layout">
-          <ul className="card wa-threads">
+          <ul className="card wa-threads" aria-label="Conversations">
             {threads.map((t) => (
               <li key={t.phone}>
                 <button className={`wa-thread ${t.phone === phone ? 'active' : ''}`} onClick={() => setPhone(t.phone)}>
-                  <div className="wa-thread-top">
-                    <b>{t.parentName || fmtPhone(t.phone)}</b>
-                    <span className="muted small">{fmtTime(t.lastAt)}</span>
+                  <div className="row between" style={{ flexWrap: 'nowrap' }}>
+                    <b className="ellipsis">{t.parentName || fmtPhone(t.phone)}</b>
+                    <span className="muted tiny">{fmtTime(t.lastAt)}</span>
                   </div>
                   <div className="muted small ellipsis">{t.students ? `${t.students} · ` : ''}{t.lastBody}</div>
                 </button>
@@ -67,28 +69,27 @@ export default function Messages() {
 
           <div className="phone">
             <div className="phone-head">
-              <div className="avatar">{(thread?.parentName || '?').replace(/^(Mr|Mrs|Ms)\.?\s*/, '').charAt(0)}</div>
+              <div className="avatar">{initials(thread?.parentName || '?')}</div>
               <div>
                 <div className="phone-title">{thread?.parentName || 'Parent'}</div>
-                <div className="phone-sub">{phone && fmtPhone(phone)}</div>
+                <div className="phone-sub">{phone && fmtPhone(phone)}{thread?.students ? ` · ${thread.students}` : ''}</div>
               </div>
             </div>
             <div className="phone-body">
               {messages?.map((m) => (
                 <div key={m.id} className={`bubble-wrap ${m.direction}`}>
                   <div className={`bubble ${m.direction}`}>
-                    {m.direction === 'out' && <div className="bubble-from">{info.instituteName}</div>}
+                    {m.direction === 'out' && <div className="bubble-from">{info.institute.name}</div>}
                     <div>{m.body}</div>
-                    <div className="bubble-time">{fmtTime(m.createdAt)}{m.error && <span className="error-text"> · failed: {m.error}</span>}</div>
+                    <div className="bubble-time">
+                      {fmtTime(m.createdAt)}
+                      {m.error && <span className="error-text"> · failed: {m.error}</span>}
+                    </div>
                   </div>
                   {m.buttons && (
                     <div className="bubble-buttons">
                       {m.buttons.map((b) => (
-                        <button
-                          key={b.id}
-                          disabled={!simulator || m.id !== lastOutWithButtons?.id}
-                          onClick={() => reply({ payload: b.id, text: b.title })}
-                        >
+                        <button key={b.id} disabled={!simulator || m.id !== lastWithButtons?.id} onClick={() => reply({ payload: b.id, text: b.title })}>
                           ↩ {b.title}
                         </button>
                       ))}
@@ -99,15 +100,9 @@ export default function Messages() {
               <div ref={endRef} />
             </div>
             {simulator && (
-              <form
-                className="phone-input"
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  if (text.trim()) reply({ text });
-                }}
-              >
-                <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Type as the parent, e.g. “aaj chutti hai”" />
-                <button type="submit" aria-label="Send">➤</button>
+              <form className="phone-input" onSubmit={(e) => { e.preventDefault(); if (text.trim()) reply({ text }); }}>
+                <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Reply as the parent, e.g. “aaj chutti hai”" aria-label="Reply as the parent" />
+                <button type="submit" aria-label="Send"><Icon name="send" /></button>
               </form>
             )}
           </div>

@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import { api, fmtPhone, fmtTime, useData, useLive, useNow } from '../api.js';
-import { Empty } from '../components.jsx';
+import { fmtAgo, fmtDate, fmtPhone, fmtTime, useApp, useData, useNow } from '../api.js';
+import { Avatar, Empty, Icon, Loading } from '../ui.jsx';
 
 const OUTCOMES = [
   { id: 'leave', label: 'On leave', tone: 'warn' },
@@ -10,13 +10,8 @@ const OUTCOMES = [
   { id: 'unreachable', label: 'Unreachable', tone: '' },
 ];
 
-function minutesAgo(iso, now) {
-  const m = Math.max(0, Math.floor((now - Date.parse(iso)) / 60000));
-  return m < 1 ? 'just now' : `${m} min ago`;
-}
-
 function TaskCard({ task, now }) {
-  const { toast } = useLive();
+  const { api, toast } = useApp();
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
   const complete = async (outcome) => {
@@ -32,26 +27,23 @@ function TaskCard({ task, now }) {
   return (
     <li className="card task">
       <div className="task-head">
-        <div>
-          <div className="eyebrow">{task.reason} · {minutesAgo(task.createdAt, now)}</div>
-          <h3>
-            Call {task.parentName || 'parent'} about {task.studentName}
-          </h3>
-          <div className="muted small">
-            {task.batchName} · class at {fmtTime(task.startsAt)} · WhatsApp sent {fmtTime(task.alertSentAt)}
+        <div className="who" style={{ alignItems: 'flex-start' }}>
+          <Avatar name={task.studentName} />
+          <div>
+            <div className="eyebrow">{task.reason} · {fmtAgo(task.createdAt, now)}</div>
+            <h3>Call {task.parentName || 'parent'} about <a href={`#/students/${task.studentId}`} style={{ color: 'inherit' }}>{task.studentName}</a></h3>
+            <div className="muted small">{task.batchName} · class at {fmtTime(task.startsAt)} · WhatsApp sent {fmtTime(task.alertSentAt)}</div>
           </div>
         </div>
         <div className="task-contact">
-          <a className="btn primary" href={`tel:+${task.parentPhone}`}>☎ {fmtPhone(task.parentPhone)}</a>
-          <a className="btn ghost small" href={`https://wa.me/${task.parentPhone}`} target="_blank" rel="noreferrer">Open WhatsApp</a>
+          <a className="btn primary" href={`tel:+${task.parentPhone}`}><Icon name="phone" /> {fmtPhone(task.parentPhone)}</a>
+          <a className="btn ghost small" href={`https://wa.me/${task.parentPhone}`} target="_blank" rel="noreferrer"><Icon name="chat" /> Open WhatsApp</a>
         </div>
       </div>
       <input className="input" placeholder="Note from the call (optional)" value={note} onChange={(e) => setNote(e.target.value)} />
       <div className="outcomes">
         {OUTCOMES.map((o) => (
-          <button key={o.id} className={`btn small outline ${o.tone}`} disabled={busy} onClick={() => complete(o.id)}>
-            {o.label}
-          </button>
+          <button key={o.id} className={`btn small outline ${o.tone}`} disabled={busy} onClick={() => complete(o.id)}>{o.label}</button>
         ))}
       </div>
     </li>
@@ -65,49 +57,40 @@ export default function Tasks() {
 
   return (
     <div className="stack">
-      <div className="page-head">
+      <div className="page-head" style={{ marginBottom: 0 }}>
         <div>
           <h1>Call tasks</h1>
-          <p className="muted">Parents who didn't reply on WhatsApp in time. Call, then log what you found out.</p>
+          <p className="muted">Parents who didn't reply on WhatsApp in time. Call them, then log what you found out. The register updates itself.</p>
         </div>
-        <div className="seg">
-          <button className={show === 'open' ? 'on' : ''} onClick={() => setShow('open')}>Open</button>
-          <button className={show === 'done' ? 'on' : ''} onClick={() => setShow('done')}>Done</button>
+        <div className="seg" role="tablist">
+          <button role="tab" aria-selected={show === 'open'} className={show === 'open' ? 'on' : ''} onClick={() => setShow('open')}>Open</button>
+          <button role="tab" aria-selected={show === 'done'} className={show === 'done' ? 'on' : ''} onClick={() => setShow('done')}>Done</button>
         </div>
       </div>
       {error && <p className="error-text">{error.message}</p>}
+      {!data && <Loading height={200} />}
       {data && !data.length && (
-        <Empty title={show === 'open' ? 'No calls pending' : 'No completed calls yet'}>
+        <Empty title={show === 'open' ? 'No calls pending' : 'No completed calls yet'} icon="phone">
           {show === 'open' && 'Every absent student’s parent has replied or been called.'}
         </Empty>
       )}
-      {data && show === 'open' && (
+      {data && show === 'open' && data.length > 0 && (
         <ul className="stack">
-          {data.map((t) => (
-            <TaskCard key={t.id} task={t} now={now} />
-          ))}
+          {data.map((t) => <TaskCard key={t.id} task={t} now={now} />)}
         </ul>
       )}
       {data && show === 'done' && data.length > 0 && (
-        <div className="card">
+        <div className="card flush table-wrap">
           <table className="table">
-            <thead>
-              <tr>
-                <th>Date</th>
-                <th>Student</th>
-                <th>Batch</th>
-                <th>Outcome</th>
-                <th>Closed</th>
-              </tr>
-            </thead>
+            <thead><tr><th>Date</th><th>Student</th><th className="hide-sm">Batch</th><th>Outcome</th><th className="hide-sm">Closed</th></tr></thead>
             <tbody>
               {data.map((t) => (
                 <tr key={t.id}>
-                  <td>{t.date}</td>
-                  <td>{t.studentName}</td>
-                  <td>{t.batchName}</td>
-                  <td>{t.outcome}</td>
-                  <td>{fmtTime(t.doneAt)}</td>
+                  <td className="small">{fmtDate(t.date)}</td>
+                  <td><a href={`#/students/${t.studentId}`} style={{ color: 'inherit' }}>{t.studentName}</a></td>
+                  <td className="small hide-sm">{t.batchName}</td>
+                  <td className="small">{t.outcome}</td>
+                  <td className="small hide-sm">{fmtTime(t.doneAt)}</td>
                 </tr>
               ))}
             </tbody>

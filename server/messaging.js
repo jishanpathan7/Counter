@@ -110,3 +110,16 @@ export function verifySignature(rawBody, header, appSecret) {
   const given = Buffer.from(header);
   return expected.length === given.length && crypto.timingSafeEqual(expected, given);
 }
+
+/** Real WhatsApp when the institute has Cloud API credentials, otherwise the simulator. */
+export function messengerFromConfig(cfg = {}) {
+  if (cfg.token && cfg.phoneNumberId) {
+    return createWhatsAppMessenger({
+      token: cfg.token,
+      phoneNumberId: cfg.phoneNumberId,
+      templateName: cfg.template,
+      templateLanguage: cfg.templateLang || 'en',
+    });
+  }
+  return createSimulatorMessenger();
+}

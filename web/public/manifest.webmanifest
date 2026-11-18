@@ -1,0 +1,14 @@
+{
+  "name": "Attendance Alert",
+  "short_name": "Attendance",
+  "description": "Mark attendance; parents of absent students get a WhatsApp in minutes.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f5f7f4",
+  "theme_color": "#2e7d4f",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/icon-maskable.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ]
+}

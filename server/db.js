@@ -82,6 +82,11 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS holidays (
+  date  TEXT PRIMARY KEY,                         -- 'YYYY-MM-DD'
+  label TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_date ON sessions(date);
 CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts(status);
 CREATE INDEX IF NOT EXISTS idx_alerts_phone ON alerts(phone);
@@ -93,5 +98,14 @@ export function openDb(file = ':memory:') {
   if (file !== ':memory:') db.exec('PRAGMA journal_mode = WAL;');
   db.exec('PRAGMA foreign_keys = ON;');
   db.exec(SCHEMA);
+  migrate(db);
   return db;
+}
+
+/** Small additive migrations for databases created by older versions. */
+function migrate(db) {
+  const hasColumn = (table, col) => db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col);
+  if (!hasColumn('batches', 'duration_minutes')) {
+    db.exec('ALTER TABLE batches ADD COLUMN duration_minutes INTEGER NOT NULL DEFAULT 120');
+  }
 }
