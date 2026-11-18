@@ -1,48 +1,92 @@
-# Counter App
+# Attendance Alert
 
-This project is made using React.
+Attendance automation for coaching institutes. When a student is absent, their parent finds out on
+WhatsApp within minutes of class starting, instead of at 6 PM when class is over.
 
-## [Deployment Link](https://m-sehrawat.github.io/Counter/)
+## How it works
 
-## Project Screenshot
+1. **Teacher marks attendance** on their phone (P / A / L).
+2. **Auto-verify**: 10 minutes after class starts, absentees are confirmed. Anyone left unmarked
+   counts as absent.
+3. **Parent gets a WhatsApp alert**: *"Aaj ki class mein Rohan ki attendance record nahi hui. Please
+   confirm."* with two buttons: **Leave** and **Late 15 min**.
+4. **Parent replies** by tapping a button, or by typing something like "aaj chutti hai".
+5. **Register updates itself**: the student goes from A to L, with the reason.
+6. **No reply in 3 minutes?** The parent goes on the **Call tasks** list. Staff call them and log
+   the outcome: leave, late, present, bunk, or unreachable.
 
-![](https://github.com/m-sehrawat/React-Assignment-2/blob/master/public/counter.png)
+The dashboard shows every batch live and how quickly parents were informed.
 
-## Available Scripts
+Built-in safeguards:
+- Parents are never messaged for a class where the teacher took no attendance. The dashboard
+  flags it as "Attendance not taken". This prevents messaging a whole batch if the system is
+  installed, or a batch is added, after class time.
+- If the teacher is still marking at verify time, verification waits until everyone is marked or
+  they have stopped for 90 seconds.
+- Each student gets at most one alert per class. A parent can only answer their own child's alert.
+- If a WhatsApp message fails to send, it goes straight to the call list.
 
-In the project directory, you can run:
+## Run it
 
-### `npm start`
+Needs Node.js 22.13 or newer.
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
+```bash
+npm install
+npm run dev        # API on :3001, app on http://localhost:5173
+```
 
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
+It starts with demo batches (Batch B: Aarav, Diya, Rohan, Meera) and the **WhatsApp simulator**.
+Alerts appear on the **WhatsApp** tab, where you can tap reply buttons as the parent.
 
-### `npm test`
+**Quick demo:** in **Setup**, set both timers to `0.5` minutes. On the **Dashboard**, press
+**Start class now** on a batch. Mark students on the **Teacher** tab, then watch alerts go out,
+reply on the **WhatsApp** tab, and wait for the call task.
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+Production:
 
-### `npm run build`
+```bash
+npm run build      # builds the app into dist/
+npm start          # serves the API and the app on PORT (default 3001)
+npm test           # runs the server tests
+```
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+Configuration is in `.env` (copy `.env.example`). Set `ACCESS_CODE` before putting the app online:
+it holds children's names and parents' phone numbers.
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+## Connecting real WhatsApp
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
+Uses the [Meta WhatsApp Cloud API](https://developers.facebook.com/docs/whatsapp/cloud-api).
 
-### `npm run eject`
+1. Create a Meta app with the WhatsApp product and get a **phone number ID** and a **permanent
+   access token**. Put them in `WHATSAPP_PHONE_NUMBER_ID` and `WHATSAPP_TOKEN`.
+2. Create a message template, for example named `attendance_alert`, category *Utility*:
+   - Body: `Namaste {{1}}, aaj ki {{2}} class ({{3}}) mein {{4}} ki attendance record nahi hui. Please confirm.`
+     (`{{1}}` parent name, `{{2}}` batch, `{{3}}` class time, `{{4}}` student name)
+   - Buttons: two **Quick reply** buttons, `Leave` and `Late 15 min`, in that order.
 
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
+   Once it is approved, set `WHATSAPP_TEMPLATE=attendance_alert` (and `WHATSAPP_TEMPLATE_LANG` to
+   the template's language code). Without a template, WhatsApp only delivers alerts to parents who
+   messaged you in the last 24 hours.
+3. Webhook: point Meta at `https://<your-server>/webhooks/whatsapp`, enter the same value you put in
+   `WHATSAPP_VERIFY_TOKEN`, and subscribe to **messages**. Set `WHATSAPP_APP_SECRET` so incoming
+   webhooks are signature-checked.
 
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
+Once `WHATSAPP_TOKEN` and `WHATSAPP_PHONE_NUMBER_ID` are set, the simulator turns off and the
+WhatsApp tab becomes a log of real messages.
 
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
+## Code layout
 
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
+```
+server/
+  index.js      starts the server and the scheduler (reads .env)
+  app.js        HTTP API, WhatsApp webhook, access code, live updates (server-sent events)
+  service.js    the attendance flow: marking, verify, alerts, replies, escalation, call tasks
+  messaging.js  WhatsApp Cloud API client, webhook parsing, simulator
+  db.js         SQLite schema (Node's built-in node:sqlite)
+  time.js       institute time-zone helpers
+  seed.js       demo data
+web/src/        React app: Dashboard, Teacher, Call tasks, WhatsApp, Setup
+test/           end-to-end flow tests (node --test)
+```
 
-
+Data lives in one SQLite file (`data/attendance.db` by default). Back it up like any other file.
