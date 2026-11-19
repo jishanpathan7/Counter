@@ -30,7 +30,7 @@ function StudentForm({ initial, batches, onSave, onCancel, saveLabel = 'Save' })
 }
 
 function Profile({ id, batches, onClose }) {
-  const { api, toast, info } = useApp();
+  const { api, toast, info, slug } = useApp();
   const { data: p, error, reload } = useData(`/students/${id}`);
   const [editing, setEditing] = useState(false);
 
@@ -43,8 +43,21 @@ function Profile({ id, batches, onClose }) {
       toast(e.message, 'bad');
     }
   };
+  const erase = async () => {
+    const typed = window.prompt(
+      `Erase ${p.name} for good?\n\nThis deletes their attendance, alerts and call notes. If no other child uses ${fmtPhone(p.parentPhone)}, the parent's WhatsApp messages and consent records are deleted too. It can't be undone (backups expire after 30 days).\n\nType the student's name to confirm:`,
+    );
+    if (typed == null) return;
+    try {
+      await api.post(`/students/${id}/erase`, { confirm: typed });
+      toast(`${p.name}'s data was erased`);
+      onClose();
+    } catch (e) {
+      toast(e.message, 'bad');
+    }
+  };
   const remove = async () => {
-    if (!window.confirm(`Remove ${p.name}? Their past attendance is kept in reports.`)) return;
+    if (!window.confirm(`Remove ${p.name}? They leave the lists, but their past attendance is kept for reports until you erase it (Settings → Privacy & data).`)) return;
     try {
       await api.del(`/students/${id}`);
       toast(`${p.name} removed`);
@@ -159,6 +172,15 @@ function Profile({ id, batches, onClose }) {
                 <div className="row">
                   <button className="btn ghost small" onClick={() => setEditing(true)}><Icon name="edit" /> Edit details</button>
                   {info.role === 'owner' && <button className="btn ghost small" style={{ color: 'var(--red)' }} onClick={remove}><Icon name="trash" /> Remove</button>}
+                </div>
+              </div>
+            )}
+            {!editing && (
+              <div className="row between" style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--line)' }}>
+                <span className="muted small">Parent asked what you hold about them?</span>
+                <div className="row">
+                  <a className="btn ghost small" href={`/api/i/${slug}/students/${id}/export`} download><Icon name="download" /> Download family data</a>
+                  {info.role === 'owner' && <button className="btn ghost small" style={{ color: 'var(--red)' }} onClick={erase}>Erase all data</button>}
                 </div>
               </div>
             )}

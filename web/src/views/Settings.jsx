@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { api as rootApi, fmtAgo, fmtDate, fmtPhone, fmtTime24, useApp, useData } from '../api.js';
+import { api as rootApi, fmtAgo, fmtDate, fmtPhone, fmtTime, fmtTime24, useApp, useData } from '../api.js';
 import { Avatar, Empty, Icon, Loading, Modal } from '../ui.jsx';
 
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -9,6 +9,7 @@ const SECTIONS = [
   { id: 'holidays', label: 'Holidays', icon: 'sun' },
   { id: 'team', label: 'Team', icon: 'users' },
   { id: 'whatsapp', label: 'WhatsApp & message', icon: 'chat' },
+  { id: 'privacy', label: 'Privacy & data', icon: 'shield' },
   { id: 'account', label: 'My account', icon: 'user' },
 ];
 
@@ -396,6 +397,11 @@ function WhatsAppSettings() {
       <MessageEditor />
       {!f ? <Loading /> : (
         <form className="card stack" onSubmit={submit}>
+          {data?.unreadable?.length > 0 && (
+            <div className="banner" style={{ background: 'var(--red-soft)', color: 'var(--red)', borderColor: 'var(--red-line)' }}>
+              <Icon name="alert" /> The saved {data.unreadable.map((k) => (k === 'token' ? 'access token' : 'app secret')).join(' and ')} can't be read, because the server's encryption key changed. Enter {data.unreadable.length > 1 ? 'them' : 'it'} again below. Until then WhatsApp messages can't be sent.
+            </div>
+          )}
           <div className="row between">
             <div>
               <h2>WhatsApp Cloud API</h2>
@@ -441,6 +447,108 @@ function WhatsAppSettings() {
   );
 }
 
+// ------------------------------------------------------------------ privacy
+const PRIVACY_ACTION = {
+  export_family: 'Downloaded a family\'s data',
+  export_all: 'Downloaded all institute data',
+  erase_student: 'Erased a student',
+};
+
+function Privacy() {
+  const { api, slug, toast } = useApp();
+  const { data, reload } = useData('/privacy');
+  const erase = async (st) => {
+    const typed = window.prompt(`Erase ${st.name} for good? Their attendance, alerts and call notes are deleted (and the parent's messages and consent, if no other child uses that number). This can't be undone.\n\nType the student's name to confirm:`);
+    if (typed == null) return;
+    try {
+      await api.post(`/students/${st.id}/erase`, { confirm: typed });
+      toast(`${st.name}'s data was erased`);
+      reload();
+    } catch (e) {
+      toast(e.message, 'bad');
+    }
+  };
+  const eraseAll = async () => {
+    const typed = window.prompt(`Erase all ${data.removed.length} removed students for good? This can't be undone.\n\nType ERASE to confirm:`);
+    if (typed == null) return;
+    try {
+      const r = await api.post('/privacy/erase-removed', { confirm: typed });
+      toast(`${r.erased} removed student${r.erased === 1 ? '' : 's'} erased`);
+      reload();
+    } catch (e) {
+      toast(e.message, 'bad');
+    }
+  };
+
+  return (
+    <div className="stack">
+      <section className="card stack">
+        <div>
+          <h2>Your data</h2>
+          <p className="muted small">
+            Students' and parents' details belong to your institute. Download everything at any time: students, attendance, alerts, WhatsApp messages and consent records, as one file you can keep or take to another system. WhatsApp credentials and PINs are not included.
+          </p>
+        </div>
+        <div><a className="btn primary" href={`/api/i/${slug}/export`} download><Icon name="download" /> Download all data</a></div>
+        <p className="muted small">
+          For one family (when a parent asks what you hold about them), open the student and use <b>Download family data</b>.
+          WhatsApp access tokens are stored encrypted.
+        </p>
+      </section>
+
+      <section className="card stack">
+        <div className="row between">
+          <div>
+            <h2>Removed students</h2>
+            <p className="muted small">Removing a student hides them but keeps their history for reports. Erase it once you no longer need it, for example at the end of the academic year, or when a parent asks.</p>
+          </div>
+          {data?.removed.length > 1 && <button className="btn ghost" style={{ color: 'var(--red)' }} onClick={eraseAll}>Erase all {data.removed.length}</button>}
+        </div>
+        {!data ? <Loading /> : data.removed.length ? (
+          <ul className="risk-list">
+            {data.removed.map((st) => (
+              <li key={st.id}>
+                <div className="grow">
+                  <b className="small">{st.name}</b> <span className="muted small">· {st.batchName} · {st.records} attendance records{st.removedAt ? ` · removed ${fmtDate(st.removedAt.slice(0, 10), { day: 'numeric', month: 'short', year: 'numeric' })}` : ''}</span>
+                </div>
+                <button className="btn ghost small" style={{ color: 'var(--red)' }} onClick={() => erase(st)}>Erase</button>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="muted small">No removed students are being kept.</p>
+        )}
+      </section>
+
+      <section className="card stack">
+        <div>
+          <h2>Privacy log</h2>
+          <p className="muted small">Every download and erasure: who, what and when. Erased students appear by number only.</p>
+        </div>
+        {data?.log.length ? (
+          <div className="table-wrap">
+            <table className="table">
+              <thead><tr><th>When</th><th>Who</th><th>What</th></tr></thead>
+              <tbody>
+                {data.log.map((l, i) => (
+                  <tr key={i}>
+                    <td className="small">{fmtDate(l.at.slice(0, 10), { day: 'numeric', month: 'short' })} {fmtTime(l.at)}</td>
+                    <td className="small">{l.actor || '—'}</td>
+                    <td className="small">{PRIVACY_ACTION[l.action] ?? l.action}{l.detail ? <div className="muted tiny">{l.detail}</div> : null}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <p className="muted small">Nothing yet.</p>
+        )}
+        <p className="muted tiny">Backup copies of erased data expire after the backup retention period (30 days by default).</p>
+      </section>
+    </div>
+  );
+}
+
 // ------------------------------------------------------------------ account
 function Account() {
   const save = useSave();
@@ -475,7 +583,7 @@ function Account() {
 export default function Settings() {
   const { route } = useApp();
   const section = SECTIONS.find((s) => s.id === route[0]) ?? SECTIONS[0];
-  const View = { general: General, batches: Batches, holidays: Holidays, team: Team, whatsapp: WhatsAppSettings, account: Account }[section.id];
+  const View = { general: General, batches: Batches, holidays: Holidays, team: Team, whatsapp: WhatsAppSettings, privacy: Privacy, account: Account }[section.id];
   return (
     <div>
       <div className="page-head"><div><h1>Settings</h1></div></div>

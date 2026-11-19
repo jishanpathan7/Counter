@@ -108,6 +108,15 @@ CREATE TABLE IF NOT EXISTS consent_log (
   at          TEXT NOT NULL
 );
 
+-- Exports and erasures, so the institute can show what was done with personal data and when.
+-- Never holds the personal data itself (an erased student is recorded by number, not name).
+CREATE TABLE IF NOT EXISTS privacy_log (
+  id     INTEGER PRIMARY KEY,
+  at     TEXT NOT NULL,
+  actor  TEXT,
+  action TEXT NOT NULL,
+  detail TEXT
+);
 CREATE TABLE IF NOT EXISTS holidays (
   date  TEXT PRIMARY KEY,                         -- 'YYYY-MM-DD'
   label TEXT NOT NULL
@@ -122,7 +131,8 @@ CREATE INDEX IF NOT EXISTS idx_messages_phone ON messages(phone);
 export function openDb(file = ':memory:') {
   const db = new DatabaseSync(file);
   if (file !== ':memory:') db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
-  db.exec('PRAGMA foreign_keys = ON;');
+  // secure_delete: erased rows are overwritten in the file, not left behind in free pages.
+  db.exec('PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;');
   db.exec(SCHEMA);
   migrate(db);
   return db;
@@ -131,6 +141,7 @@ export function openDb(file = ':memory:') {
 /** Small additive migrations for databases created by older versions. */
 function migrate(db) {
   const hasColumn = (table, col) => db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col);
+  if (!hasColumn('students', 'removed_at')) db.exec('ALTER TABLE students ADD COLUMN removed_at TEXT');
   if (!hasColumn('batches', 'duration_minutes')) {
     db.exec('ALTER TABLE batches ADD COLUMN duration_minutes INTEGER NOT NULL DEFAULT 120');
   }

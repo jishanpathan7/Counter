@@ -51,6 +51,10 @@ export function createRuntime({ env = process.env, serverless = false, dev = fal
   });
   const tickMs = Math.max(1, Number(env.TICK_SECONDS ?? 10)) * 1000;
 
+  if (env.DATA_ENCRYPTION_KEY && env.DATA_ENCRYPTION_KEY.length < 32) {
+    throw new Error('DATA_ENCRYPTION_KEY must be at least 32 characters, e.g. the output of `openssl rand -hex 32`.');
+  }
+
   const hub = createEventHub();
   const platform = new Platform({ dataDir, tz, env, logger, reporter, onChange: (slug) => hub.broadcast(slug) });
 

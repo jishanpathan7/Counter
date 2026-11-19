@@ -68,6 +68,11 @@ Docker also checks `/api/health` itself, and Caddy only starts sending traffic o
 
 ## Backups and restoring
 
+> **Keep a copy of `deploy/.env` somewhere safe**, such as a password manager. The backups hold the
+> data, but the WhatsApp credentials inside them are encrypted with `DATA_ENCRYPTION_KEY` (or a key
+> derived from `SESSION_SECRET`). Restore with a different key and everything works except WhatsApp
+> sending, until the owner enters the token again.
+
 **On a new server, restoring happens by itself.** On start, the app restores any database that's
 missing on disk from the bucket, then carries on backing up. To move servers, or after losing one:
 run the same `.env` on a new VM and `docker compose up -d`. Point DNS at the new IP.
@@ -101,6 +106,17 @@ docker compose cp app:/tmp/before.db ./before.db    # to inspect it
 
 Swapping it in for the live database is a deliberate step: stop the app, keep the current file as a
 spare, put the copy in its place, and start again. Ask your developer if in doubt.
+
+## Erased data and backups
+
+When a student is erased or an institute deleted, the live database changes at once. Copies already
+in the backup bucket are kept for the retention period (`BACKUP_RETENTION`, 30 days by default) and
+then removed. So you can tell a parent their data is erased now and gone from the backups within
+30 days.
+
+A deleted institute's database is no longer watched, so its folder (`<BACKUP_S3_PATH>/institutes/<slug>.db/`)
+stays in the bucket until you delete it there. Delete it once you're sure, for example with the
+storage provider's console.
 
 ## Storage key policy (AWS)
 

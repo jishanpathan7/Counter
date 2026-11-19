@@ -204,6 +204,8 @@ export function createApp({ platform, hub, demo = false, setupToken = null, real
     res.status(201).json(platform.createInstitute({ name, slug, city, feeMonthly, owner, ownerUserId: owner ? null : req.user.id }));
   });
   agency.patch('/institutes/:slug', (req, res) => res.json(platform.updateInstitute(req.params.slug, req.body ?? {})));
+  agency.post('/institutes/:slug/delete', (req, res) => res.json(platform.deleteInstitute(req.params.slug, { confirm: req.body?.confirm, actor: req.user.name })));
+  agency.get('/privacy-log', (_req, res) => res.json(platform.listPlatformPrivacyLog()));
   app.use('/api/agency', agency);
 
   // ------------------------------------------------------------------ one institute
@@ -326,6 +328,35 @@ export function createApp({ platform, hub, demo = false, setupToken = null, real
   inst.delete('/students/:id', OWNER, (req, res) => {
     req.svc.deleteStudent(Number(req.params.id));
     res.sendStatus(204);
+  });
+
+  // privacy: export and erase (DPDP)
+  const download = (res, name, data) => {
+    res.set({ 'Content-Disposition': `attachment; filename="${name}"`, 'Cache-Control': 'no-store' });
+    res.type('application/json').send(JSON.stringify(data, null, 2));
+  };
+  const fileSafe = (v) => String(v ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'data';
+  inst.get('/students/:id/export', MGMT, (req, res) => {
+    const data = req.svc.exportFamily(Number(req.params.id), { actor: req.user.name });
+    download(res, `${fileSafe(data.students[0]?.name)}-family-data-${req.svc.today()}.json`, data);
+  });
+  inst.get('/export', OWNER, (req, res) => {
+    const data = req.svc.exportAll({ actor: req.user.name });
+    data.team = platform.listTeam(req.params.slug).map(({ name, phone, role }) => ({ name, phone, role }));
+    download(res, `${req.params.slug}-all-data-${req.svc.today()}.json`, data);
+  });
+  inst.post('/students/:id/erase', OWNER, (req, res) => {
+    const st = req.svc.db.prepare('SELECT name FROM students WHERE id = ?').get(Number(req.params.id));
+    if (!st) throw new HttpError(404, 'Student not found');
+    if (String(req.body?.confirm ?? '').trim().toLowerCase() !== st.name.trim().toLowerCase()) {
+      throw new HttpError(400, "Type the student's name exactly to confirm");
+    }
+    res.json(req.svc.eraseStudent(Number(req.params.id), { actor: req.user.name }));
+  });
+  inst.get('/privacy', OWNER, (req, res) => res.json({ removed: req.svc.listRemovedStudents(), log: req.svc.listPrivacyLog() }));
+  inst.post('/privacy/erase-removed', OWNER, (req, res) => {
+    if (req.body?.confirm !== 'ERASE') throw new HttpError(400, 'Type ERASE to confirm');
+    res.json(req.svc.eraseRemovedStudents({ actor: req.user.name }));
   });
 
   // holidays

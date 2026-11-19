@@ -81,6 +81,7 @@ export const TASK_OUTCOMES = {
 };
 
 const STATUSES = ['P', 'A', 'L', 'T'];
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 export const STATUS_WORDS = { P: 'present', A: 'absent', L: 'on leave', T: 'late' };
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 
@@ -140,8 +141,9 @@ function parsePhone(value) {
 }
 
 export class AttendanceService {
-  constructor({ db, messenger, clock = () => Date.now(), tz = 'Asia/Kolkata', onChange = () => {}, logger = console }) {
+  constructor({ db, messenger, clock = () => Date.now(), tz = 'Asia/Kolkata', onChange = () => {}, logger = console, secrets = null }) {
     this.db = db;
+    this.secrets = secrets; // encrypts the WhatsApp token and app secret at rest (see secrets.js)
     this.messenger = messenger;
     this.clock = clock;
     this.tz = tz;
@@ -217,16 +219,49 @@ export class AttendanceService {
     return this.getSettings();
   }
 
-  /** Full WhatsApp config (server-side only). */
+  /**
+   * Full WhatsApp config (server-side only), with the token and app secret decrypted.
+   * A credential that can't be decrypted (the encryption key changed) comes back empty and is listed
+   * in `unreadable`, so the owner is asked to enter it again instead of the app sending with garbage.
+   */
   getWhatsAppConfig() {
     const s = this.rawSettings();
-    return Object.fromEntries(WA_KEYS.map((k) => [k, s[`wa.${k}`] ?? '']));
+    const unreadable = [];
+    const cfg = Object.fromEntries(
+      WA_KEYS.map((k) => {
+        const v = s[`wa.${k}`] ?? '';
+        if (!WA_SECRET.has(k) || !this.secrets) return [k, v];
+        try {
+          return [k, this.secrets.open(v)];
+        } catch {
+          unreadable.push(k);
+          return [k, ''];
+        }
+      }),
+    );
+    if (unreadable.length) Object.defineProperty(cfg, 'unreadable', { value: unreadable, enumerable: false });
+    return cfg;
   }
 
   /** WhatsApp config safe to show in the browser: secrets are reduced to "set / not set". */
   getWhatsAppPublic() {
     const c = this.getWhatsAppConfig();
-    return Object.fromEntries(WA_KEYS.map((k) => [k, WA_SECRET.has(k) ? Boolean(c[k]) : c[k]]));
+    return { ...Object.fromEntries(WA_KEYS.map((k) => [k, WA_SECRET.has(k) ? Boolean(c[k]) : c[k]])), unreadable: c.unreadable ?? [] };
+  }
+
+  /** Encrypt credentials saved by older versions in plain text. Returns how many were converted. */
+  sealStoredSecrets() {
+    if (!this.secrets) return 0;
+    const s = this.rawSettings();
+    let n = 0;
+    for (const k of WA_SECRET) {
+      const v = s[`wa.${k}`];
+      if (v && !this.secrets.isSealed(v)) {
+        this.setSetting(`wa.${k}`, this.secrets.seal(v));
+        n += 1;
+      }
+    }
+    return n;
   }
 
   updateWhatsAppConfig(patch = {}) {
@@ -235,7 +270,7 @@ export class AttendanceService {
       if (WA_SECRET.has(k) && patch[k] === true) continue; // "keep existing"
       const v = String(patch[k]).trim();
       if (v.length > 600) throw new HttpError(400, `${k} is too long`);
-      this.setSetting(`wa.${k}`, v);
+      this.setSetting(`wa.${k}`, WA_SECRET.has(k) && this.secrets ? this.secrets.seal(v) : v);
     }
     this.changed();
     return this.getWhatsAppPublic();
@@ -329,10 +364,150 @@ export class AttendanceService {
     return this.listStudents(batchId).find((x) => x.id === s.id);
   }
 
+  /** "Remove": the student leaves the lists; their history stays for reports until it is erased. */
   deleteStudent(id) {
-    const r = this.db.prepare('UPDATE students SET active = 0 WHERE id = ? AND active = 1').run(id);
+    const r = this.db.prepare('UPDATE students SET active = 0, removed_at = ? WHERE id = ? AND active = 1').run(this.nowIso(), id);
     if (!r.changes) throw new HttpError(404, 'Student not found');
     this.changed();
+  }
+
+  // ----------------------------------------------------------------- privacy (DPDP)
+
+  logPrivacy(actor, action, detail = null) {
+    this.db.prepare('INSERT INTO privacy_log (at, actor, action, detail) VALUES (?, ?, ?, ?)').run(this.nowIso(), actor ?? null, action, detail);
+  }
+
+  listPrivacyLog(limit = 100) {
+    return this.db.prepare('SELECT at, actor, action, detail FROM privacy_log ORDER BY id DESC LIMIT ?').all(limit);
+  }
+
+  /** Students who were removed but whose data is still kept. */
+  listRemovedStudents() {
+    return this.db
+      .prepare(
+        `SELECT st.id, st.name, st.parent_name AS parentName, st.parent_phone AS parentPhone, st.removed_at AS removedAt, b.name AS batchName,
+                (SELECT COUNT(*) FROM attendance a WHERE a.student_id = st.id) AS records
+           FROM students st JOIN batches b ON b.id = st.batch_id
+          WHERE st.active = 0 ORDER BY st.removed_at DESC, st.name`,
+      )
+      .all();
+  }
+
+  /**
+   * Everything held about one family (the parent's number and every child on it, current or removed),
+   * for a parent who asks what the institute has on them.
+   */
+  exportFamily(studentId, { actor = null } = {}) {
+    const first = this.db.prepare('SELECT * FROM students WHERE id = ?').get(studentId);
+    if (!first) throw new HttpError(404, 'Student not found');
+    const phone = first.parent_phone;
+    const children = this.db
+      .prepare('SELECT st.*, b.name AS batch_name FROM students st JOIN batches b ON b.id = st.batch_id WHERE st.parent_phone = ? ORDER BY st.id = ? DESC, st.id')
+      .all(phone, studentId); // the student asked about first
+    const out = {
+      exportedAt: this.nowIso(),
+      institute: this.rawSettings().instituteName,
+      parent: { name: first.parent_name, phone },
+      students: children.map((c) => ({
+        name: c.name,
+        batch: c.batch_name,
+        status: c.active ? 'current' : `removed ${c.removed_at ?? ''}`.trim(),
+        attendance: this.db
+          .prepare(
+            `SELECT se.date, b.name AS batch, a.status, a.note, a.source, a.updated_at AS updatedAt
+               FROM attendance a JOIN sessions se ON se.id = a.session_id JOIN batches b ON b.id = se.batch_id
+              WHERE a.student_id = ? ORDER BY se.date, b.name`,
+          )
+          .all(c.id)
+          .map((a) => ({ ...a, status: STATUS_WORDS[a.status] ?? a.status })),
+        alerts: this.db
+          .prepare(
+            `SELECT se.date, al.status, al.sent_at AS sentAt, al.reply, al.replied_at AS repliedAt, al.error,
+                    t.reason AS callReason, t.outcome AS callOutcome, t.done_at AS calledAt
+               FROM alerts al JOIN sessions se ON se.id = al.session_id LEFT JOIN tasks t ON t.alert_id = al.id
+              WHERE al.student_id = ? ORDER BY al.sent_at`,
+          )
+          .all(c.id),
+      })),
+      whatsappMessages: this.db.prepare('SELECT direction, body, created_at AS at, error FROM messages WHERE phone = ? ORDER BY id').all(phone),
+      consent: this.consentFor(phone),
+      consentHistory: this.db.prepare('SELECT status, source, wording, recorded_by AS recordedBy, at FROM consent_log WHERE phone = ? ORDER BY id').all(phone),
+    };
+    const sibs = children.length - 1;
+    this.logPrivacy(actor, 'export_family', `student #${studentId}${sibs ? ` and ${plural(sibs, 'sibling')}` : ''}`);
+    return out;
+  }
+
+  /** The institute's whole database as JSON (to keep a copy, or to move to another system). Credentials are left out. */
+  exportAll({ actor = null } = {}) {
+    const rows = (sql) => this.db.prepare(sql).all();
+    const settings = Object.fromEntries(
+      rows('SELECT key, value FROM settings').filter((r) => !/^wa\.(token|appSecret|verifyToken)$/.test(r.key)).map((r) => [r.key, r.value]),
+    );
+    this.logPrivacy(actor, 'export_all', null);
+    return {
+      format: 'attendance-alert-export',
+      version: 1,
+      exportedAt: this.nowIso(),
+      settings,
+      batches: rows('SELECT * FROM batches ORDER BY id'),
+      students: rows('SELECT * FROM students ORDER BY id'),
+      sessions: rows('SELECT * FROM sessions ORDER BY id'),
+      attendance: rows('SELECT * FROM attendance ORDER BY session_id, student_id'),
+      alerts: rows('SELECT * FROM alerts ORDER BY id'),
+      tasks: rows('SELECT * FROM tasks ORDER BY id'),
+      messages: rows('SELECT * FROM messages ORDER BY id'),
+      consents: rows('SELECT * FROM consents ORDER BY phone'),
+      consentLog: rows('SELECT * FROM consent_log ORDER BY id'),
+      holidays: rows('SELECT * FROM holidays ORDER BY date'),
+      privacyLog: rows('SELECT * FROM privacy_log ORDER BY id'),
+    };
+  }
+
+  /**
+   * Erase a student for good: attendance, alerts, call tasks and the student record. If no other
+   * child uses the same parent number, the parent's WhatsApp messages and consent records go too.
+   * A parent who sent STOP stays on the do-not-message list (number only), so they are never
+   * messaged again by mistake.
+   */
+  eraseStudent(id, { actor = null } = {}) {
+    const st = this.db.prepare('SELECT * FROM students WHERE id = ?').get(id);
+    if (!st) throw new HttpError(404, 'Student not found');
+    const counts = {};
+    this.db.exec('BEGIN');
+    try {
+      const run = (sql, ...args) => this.db.prepare(sql).run(...args).changes;
+      counts.calls = run('DELETE FROM tasks WHERE alert_id IN (SELECT id FROM alerts WHERE student_id = ?)', id);
+      counts.alerts = run('DELETE FROM alerts WHERE student_id = ?', id);
+      counts.attendance = run('DELETE FROM attendance WHERE student_id = ?', id);
+      run('DELETE FROM students WHERE id = ?', id);
+      const siblings = this.db.prepare('SELECT COUNT(*) AS n FROM students WHERE parent_phone = ?').get(st.parent_phone).n;
+      counts.messages = 0;
+      if (!siblings) {
+        counts.messages = run('DELETE FROM messages WHERE phone = ?', st.parent_phone);
+        run('DELETE FROM consent_log WHERE phone = ?', st.parent_phone);
+        run("DELETE FROM consents WHERE phone = ? AND status != 'opted_out'", st.parent_phone);
+        run("UPDATE consents SET wording = NULL, recorded_by = NULL WHERE phone = ?", st.parent_phone);
+      }
+      this.logPrivacy(
+        actor,
+        'erase_student',
+        `student #${id}: ${plural(counts.attendance, 'attendance record')}, ${plural(counts.alerts, 'alert')}, ${plural(counts.calls, 'call')}, ${plural(counts.messages, 'message')}${siblings ? ' (parent kept: another child is enrolled)' : ''}`,
+      );
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+    this.changed();
+    return counts;
+  }
+
+  /** Erase every removed student (e.g. at the end of the academic year). */
+  eraseRemovedStudents({ actor = null } = {}) {
+    const ids = this.db.prepare('SELECT id FROM students WHERE active = 0').all().map((r) => r.id);
+    for (const id of ids) this.eraseStudent(id, { actor });
+    return { erased: ids.length };
   }
 
   // ---------------------------------------------------------------- sessions

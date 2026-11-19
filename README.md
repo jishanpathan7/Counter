@@ -76,6 +76,32 @@ for the same. So by default (Settings → General → *Parent consent*):
   and changing or resetting a PIN signs that person out on every other device.
 - Behind a proxy or load balancer set `TRUST_PROXY` so limits use the visitor's real address.
 
+### Privacy and data
+
+Students' and parents' details belong to the institute, and the app is built so the institute can
+answer to parents and to India's DPDP Act:
+
+- **Export.** The front desk or owner can download everything held about one family when a parent
+  asks: every child on that number, attendance, alerts, call notes, WhatsApp messages and consent
+  history. The owner can download the whole institute as one JSON file (Settings → Privacy & data),
+  to keep or to move to another system. Credentials and PINs are never included.
+- **Erasure.**
+  - "Remove" only hides a student. **Erase** deletes their attendance, alerts and call notes for
+    good. If no other child uses the parent's number, it also deletes that parent's messages and
+    consent records. A parent who sent STOP stays on the do-not-message list (number only).
+  - Removed students are listed under Settings → Privacy & data, to erase one by one or all at
+    once (for example at the end of the year).
+  - Erased rows are overwritten in the database file, not just unlinked.
+- **Closing an account.** The agency admin can delete a paused institute. That deletes its database
+  and the logins of team members who use no other institute.
+- **Privacy log.** Every download and erasure is logged with who and when. Erased students appear by
+  number, never by name.
+- **Encrypted credentials.** Each institute's WhatsApp access token and app secret are stored
+  encrypted (AES-256-GCM). The key comes from `DATA_ENCRYPTION_KEY`, or is derived from
+  `SESSION_SECRET`, and is never stored in the database or the backups. Older plain-text values
+  are encrypted automatically. If the key changes, the app doesn't send with a broken token: it
+  asks the owner to enter it again.
+
 ### Safeguards
 
 - Parents are only messaged for a class the teacher has **sent to the office**. A forgotten or

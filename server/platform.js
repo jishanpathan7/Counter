@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { promisify } from 'node:util';
+import { createSecretBox } from './secrets.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -61,6 +62,14 @@ CREATE TABLE IF NOT EXISTS memberships (
   role         TEXT NOT NULL CHECK (role IN ('owner', 'staff', 'teacher')),
   batch_ids    TEXT NOT NULL DEFAULT '[]',     -- teachers: the batches they take
   PRIMARY KEY (user_id, institute_id)
+);
+-- Institutes deleted for good (the institute's own privacy log goes with its database).
+CREATE TABLE IF NOT EXISTS privacy_log (
+  id     INTEGER PRIMARY KEY,
+  at     TEXT NOT NULL,
+  actor  TEXT,
+  action TEXT NOT NULL,
+  detail TEXT
 );
 `;
 
@@ -150,7 +159,7 @@ export class Platform {
     this.db = new DatabaseSync(dataDir ? path.join(dataDir, 'platform.db') : ':memory:');
     // WAL + a busy timeout: the backup process (Litestream) briefly holds read locks.
     if (dataDir) this.db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
-    this.db.exec('PRAGMA foreign_keys = ON;');
+    this.db.exec('PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;');
     this.db.exec(SCHEMA);
   }
 
@@ -166,6 +175,12 @@ export class Platform {
 
   setMeta(key, value) {
     this.db.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, String(value));
+  }
+
+  /** Encrypts stored credentials. Key: DATA_ENCRYPTION_KEY, else derived from the session secret. */
+  secretBox() {
+    if (!this._secretBox) this._secretBox = createSecretBox(this.env.DATA_ENCRYPTION_KEY || this.secret());
+    return this._secretBox;
   }
 
   /** HMAC secret for login cookies: SESSION_SECRET, or a random one kept in the database. */
@@ -340,6 +355,53 @@ export class Platform {
     return this.publicInstitute(this.institute(slug));
   }
 
+  /**
+   * Delete an institute for good, when its contract ends: its database (students, attendance,
+   * messages, consents), its memberships, and the accounts of team members who use no other
+   * institute. Copies in the backup storage expire after the backup retention period.
+   */
+  deleteInstitute(slug, { confirm, actor = null } = {}) {
+    const inst = this.institute(slug);
+    if (inst.status !== 'paused') throw new HttpError(409, 'Pause the institute first, then delete it.');
+    if (confirm !== slug) throw new HttpError(400, `Type the institute's short name (${slug}) to confirm`);
+    const svc = this.services.get(slug);
+    if (svc) {
+      svc.db.close();
+      this.services.delete(slug);
+    }
+    const members = this.db.prepare('SELECT user_id AS id FROM memberships WHERE institute_id = ?').all(inst.id).map((r) => r.id);
+    let accounts = 0;
+    this.db.exec('BEGIN');
+    try {
+      this.db.prepare('DELETE FROM memberships WHERE institute_id = ?').run(inst.id);
+      this.db.prepare('DELETE FROM institutes WHERE id = ?').run(inst.id);
+      for (const id of members) {
+        const u = this.db.prepare('SELECT phone, is_agency FROM users WHERE id = ?').get(id);
+        const elsewhere = this.db.prepare('SELECT COUNT(*) AS n FROM memberships WHERE user_id = ?').get(id).n;
+        if (!u || u.is_agency || elsewhere) continue;
+        this.db.prepare('DELETE FROM login_failures WHERE phone = ?').run(u.phone);
+        this.db.prepare('DELETE FROM users WHERE id = ?').run(id); // their sessions go with it
+        accounts += 1;
+      }
+      this.db
+        .prepare('INSERT INTO privacy_log (at, actor, action, detail) VALUES (?, ?, ?, ?)')
+        .run(new Date(this.clock()).toISOString(), actor, 'delete_institute', `${inst.name} (${slug}): database and ${accounts} team account${accounts === 1 ? '' : 's'} deleted`);
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+    if (this.dataDir) {
+      for (const ext of ['', '-wal', '-shm']) fs.rmSync(path.join(this.dataDir, 'institutes', `${slug}.db${ext}`), { force: true });
+    }
+    this.onChange(slug);
+    return { deleted: slug, accounts };
+  }
+
+  listPlatformPrivacyLog(limit = 50) {
+    return this.db.prepare('SELECT at, actor, action, detail FROM privacy_log ORDER BY id DESC LIMIT ?').all(limit);
+  }
+
   /** The attendance service (and database) for one institute, opened on first use. */
   service(slug) {
     if (this.services.has(slug)) return this.services.get(slug);
@@ -353,8 +415,17 @@ export class Platform {
       clock: this.clock,
       onChange: () => this.onChange(slug),
       logger: this.logger,
+      secrets: this.secretBox(),
     });
-    svc.messenger = messengerFromConfig(svc.getWhatsAppConfig(), { apiVersion: this.env.WHATSAPP_GRAPH_VERSION });
+    const sealed = svc.sealStoredSecrets();
+    if (sealed) this.logger.log?.(`Encrypted ${sealed} stored WhatsApp credential${sealed === 1 ? '' : 's'} for ${slug}`);
+    const cfg = svc.getWhatsAppConfig();
+    if (cfg.unreadable) {
+      const err = new Error(`WhatsApp ${cfg.unreadable.join(' and ')} for ${slug} can't be decrypted: the encryption key changed. Enter them again in Settings → WhatsApp.`);
+      this.logger.error?.(err.message);
+      this.reporter?.capture(err, { tags: { where: 'secrets', institute: slug } });
+    }
+    svc.messenger = messengerFromConfig(cfg, { apiVersion: this.env.WHATSAPP_GRAPH_VERSION });
     this.services.set(slug, svc);
     return svc;
   }

@@ -108,6 +108,20 @@ export default function Agency({ me, logout, theme, toast }) {
     load();
   };
 
+  const remove = async (i) => {
+    const typed = window.prompt(
+      `Delete ${i.name} for good?\n\nThis deletes all their students, attendance, WhatsApp messages and consent records, and the logins of team members who use no other institute. It can't be undone. Backup copies expire after the retention period (30 days).\n\nDownload their data first if they want it: open the institute → Settings → Privacy & data.\n\nType ${i.slug} to confirm:`,
+    );
+    if (typed == null) return;
+    try {
+      const r = await api.post(`/agency/institutes/${i.slug}/delete`, { confirm: typed.trim() });
+      toast(`${i.name} deleted (${r.accounts} team login${r.accounts === 1 ? '' : 's'} removed)`);
+      load();
+    } catch (e) {
+      toast(e.message, 'bad');
+    }
+  };
+
   const t = data?.totals;
   return (
     <div style={{ minHeight: '100vh' }}>
@@ -179,6 +193,7 @@ export default function Agency({ me, logout, theme, toast }) {
                         <button className="btn ghost small" onClick={() => toggle(i)}>
                           <Icon name={i.status === 'active' ? 'pause' : 'play'} /> {i.status === 'active' ? 'Pause' : 'Resume'}
                         </button>
+                        {i.status === 'paused' && <button className="btn ghost small" style={{ color: 'var(--red)' }} onClick={() => remove(i)}><Icon name="trash" /> Delete</button>}
                         <button className="btn small" onClick={() => navigate(`/i/${i.slug}/`)}>Open <Icon name="arrow" /></button>
                       </div>
                     </div>
