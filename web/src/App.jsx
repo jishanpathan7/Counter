@@ -4,6 +4,7 @@ import { Avatar, BrandMark, Icon, useTheme } from './ui.jsx';
 import { Login, NewPin, SetupWizard } from './views/Auth.jsx';
 import Agency from './views/Agency.jsx';
 import Dashboard from './views/Dashboard.jsx';
+import Today from './views/Today.jsx';
 import Teacher from './views/Teacher.jsx';
 import Students from './views/Students.jsx';
 import Tasks from './views/Tasks.jsx';
@@ -11,15 +12,19 @@ import Messages from './views/Messages.jsx';
 import Reports from './views/Reports.jsx';
 import Settings from './views/Settings.jsx';
 
+// Order = importance. On phones the first four show as tabs and the rest go under "More".
+// `menu` lists who sees the item in the menu; anyone in `roles` can still open it by link.
 const NAV = [
-  { id: 'dashboard', label: 'Dashboard', icon: 'grid', roles: ['owner', 'staff'], view: Dashboard },
+  { id: 'today', label: 'Today', icon: 'clock', roles: ['owner', 'staff'], menu: ['staff'], view: Today },
+  { id: 'dashboard', label: 'Home', icon: 'grid', roles: ['owner', 'staff'], menu: ['owner'], view: Dashboard },
   { id: 'attendance', label: 'Take attendance', short: 'Attendance', icon: 'check', roles: ['owner', 'staff', 'teacher'], view: Teacher },
+  { id: 'calls', label: 'Calls', icon: 'phone', roles: ['owner', 'staff'], view: Tasks },
   { id: 'students', label: 'Students', icon: 'users', roles: ['owner', 'staff'], view: Students },
-  { id: 'calls', label: 'Call tasks', short: 'Calls', icon: 'phone', roles: ['owner', 'staff'], view: Tasks },
   { id: 'whatsapp', label: 'WhatsApp', icon: 'chat', roles: ['owner', 'staff'], view: Messages },
   { id: 'reports', label: 'Reports', icon: 'chart', roles: ['owner', 'staff'], view: Reports },
   { id: 'settings', label: 'Settings', icon: 'gear', roles: ['owner'], view: Settings },
 ];
+const MOBILE_TABS = 4;
 
 const ROLE_LABEL = { owner: 'Owner', staff: 'Front desk', teacher: 'Teacher' };
 
@@ -37,6 +42,49 @@ function useToast() {
     return () => clearTimeout(t);
   }, [toast]);
   return [toast, show];
+}
+
+/** Phone tab bar: the four most important places, the rest under "More" (no sideways scrolling). */
+function MobileBar({ nav, current, openTasks }) {
+  const [open, setOpen] = useState(false);
+  const tabs = nav.length > MOBILE_TABS + 1 ? nav.slice(0, MOBILE_TABS) : nav;
+  const more = nav.slice(tabs.length);
+  const moreActive = more.some((n) => n.id === current.id);
+  useEffect(() => setOpen(false), [current.id]);
+  const item = (n) => (
+    <>
+      <Icon name={n.icon} />
+      {n.short ?? n.label}
+      {n.id === 'calls' && openTasks > 0 && <span className="count">{openTasks}</span>}
+    </>
+  );
+  return (
+    <>
+      {open && <div className="more-scrim" onClick={() => setOpen(false)} />}
+      {open && (
+        <div className="more-sheet" role="menu">
+          {more.map((n) => (
+            <a key={n.id} role="menuitem" href={`#/${n.id}`} className={current.id === n.id ? 'active' : ''} onClick={() => setOpen(false)}>
+              <Icon name={n.icon} /> {n.label}
+            </a>
+          ))}
+        </div>
+      )}
+      <nav className="mobilebar" aria-label="Main">
+        {tabs.map((n) => (
+          <a key={n.id} href={`#/${n.id}`} className={current.id === n.id ? 'active' : ''} aria-current={current.id === n.id ? 'page' : undefined}>
+            {item(n)}
+          </a>
+        ))}
+        {more.length > 0 && (
+          <button type="button" className={moreActive || open ? 'active' : ''} aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+            <Icon name="more" />
+            More
+          </button>
+        )}
+      </nav>
+    </>
+  );
 }
 
 function Picker({ me, logout }) {
@@ -109,9 +157,10 @@ function InstituteApp({ slug, me, logout, theme }) {
   }
   if (!info) return <div className="center muted">Loading…</div>;
 
-  const nav = NAV.filter((n) => n.roles.includes(info.role));
+  const allowed = NAV.filter((n) => n.roles.includes(info.role));
+  const nav = allowed.filter((n) => !n.menu || n.menu.includes(info.role));
   const [tabId, ...rest] = hash.split('/');
-  const current = nav.find((n) => n.id === tabId) ?? nav[0];
+  const current = allowed.find((n) => n.id === tabId) ?? nav[0];
   const View = current.view;
   const others = me.memberships.length > 1 || me.user.isAgency;
 
@@ -149,8 +198,8 @@ function InstituteApp({ slug, me, logout, theme }) {
           {sideNav}
           <div className="sidebar-foot">
             {info.institute.status === 'paused' && <span className="chip warn mode-chip">Paused</span>}
-            <span className={`chip ${info.mode === 'whatsapp' ? 'ok' : 'warn'} mode-chip`} title={info.mode === 'whatsapp' ? 'Connected to WhatsApp Cloud API' : 'No WhatsApp account connected: messages go to the simulator'}>
-              <span className={`live-dot ${live ? 'on' : ''}`} /> {info.mode === 'whatsapp' ? 'WhatsApp live' : 'Simulator mode'}
+            <span className={`chip ${info.mode === 'whatsapp' ? 'ok' : 'warn'} mode-chip`} title={info.mode === 'whatsapp' ? 'Parents get alerts on WhatsApp' : 'WhatsApp is not connected yet: messages stay inside the app and no parent is contacted'}>
+              <span className={`live-dot ${live ? 'on' : ''}`} /> {info.mode === 'whatsapp' ? 'WhatsApp live' : 'Practice mode'}
             </span>
             <div className="me">
               <Avatar name={me.user.name} />
@@ -182,15 +231,7 @@ function InstituteApp({ slug, me, logout, theme }) {
         </div>
 
         {nav.length > 1 && (
-          <nav className="mobilebar" aria-label="Main">
-            {nav.map((n) => (
-              <a key={n.id} href={`#/${n.id}`} className={current.id === n.id ? 'active' : ''}>
-                <Icon name={n.icon} />
-                {n.short ?? n.label}
-                {n.id === 'calls' && openTasks > 0 && <span className="count">{openTasks}</span>}
-              </a>
-            ))}
-          </nav>
+          <MobileBar nav={nav} current={current} openTasks={openTasks} />
         )}
       </div>
       <Toast toast={toast} />

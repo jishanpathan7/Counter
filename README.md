@@ -25,14 +25,20 @@ parents who don't reply land on the front desk's call list.
 | Area | What it does |
 | --- | --- |
 | **Agency console** | Every institute you run in one place: monthly revenue, students covered, alerts sent, 7-day attendance trend. Add an institute with its owner's login in one form; pause or resume an institute (no logins, no messages). |
-| **Dashboard** | Today's six steps as a live funnel, an impact card ("parents hear within 10 min, 1h 40m before class ends"), live class cards with a step-by-step timeline, an activity feed and students who need attention. Updates live. |
+| **Today** (front desk) | The front desk's landing screen: one line saying what needs doing, then parents to call (urgent first), classes the teacher hasn't sent, parents still to reply with a countdown, and classes later today. "Nothing needs you right now" when it's all done. |
+| **Home** (owner) | One sentence on how today is going (with a link to the to-do list), an impact card ("parents hear within 10 min, 1h 40m before class ends"), class cards with a timeline, an activity feed and students who need attention. Updates live. |
 | **Take attendance** | Big P / A / L buttons, progress bar and "mark all present". Teachers see only their own batches and never see parents' numbers. |
 | **Students** | Search, filter and sort by 30-day attendance. WhatsApp consent per parent ("Agreed", "Not asked", "Said STOP"), a "No WhatsApp consent" filter, one button to record signed admission forms, and a copyable `wa.me/…?text=START` opt-in link. At-risk flags: under 75%, 3+ absences in 14 days, or repeated bunks. Profile with a 90-day calendar, streaks, every WhatsApp alert and reply, and one-tap call / WhatsApp. |
 | **CSV import** | Paste from Excel or upload a CSV. A preview flags bad phone numbers and unknown batches before anything is saved. |
-| **Call tasks** | Tap to call, add a note, log the outcome; the register updates itself. |
+| **Calls** | Tap to call, add a note, log the outcome; the register updates itself. |
 | **WhatsApp** | Every message in and out. Until a WhatsApp account is connected, a phone-style simulator lets you reply as the parent. |
 | **Reports** | 7 / 30 / 90 days, this month or a custom range, by batch. Daily chart, batch and student tables, reply rate, average reply time, bunks caught. CSV export. |
 | **Settings** | Class timers, batches (time, length, days), holidays (no classes, no alerts), team and roles, the alert message editor with live preview (Hinglish, English, हिंदी), WhatsApp Cloud API connection, owner's daily summary, PIN change. |
+
+Readable by design: text meets WCAG AA contrast (4.5:1) in light and dark mode, checked on every
+screen; six text sizes with a 16px base; plain words instead of system terms ("practice mode", not
+"simulator"); Meta's technical WhatsApp fields are folded away from owners; on phones the tab bar
+holds four places plus "More".
 
 Also included: phone + PIN login (6–8 digit PINs that aren't a sequence, a repeat or part of the
 mobile number; older or easy PINs must be replaced at the next login), four roles (agency admin,

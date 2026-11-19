@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { fmtDate, fmtDuration, fmtTime, fmtTime24, useApp, useData, useNow } from '../api.js';
 import { AlertState, Empty, Icon, Kpi, Loading, SessionBadge, StatusPill } from '../ui.jsx';
+import { dayWork, statusLine } from './Today.jsx';
 
 const FEED_ICON = { start: 'play', mark: 'check', submit: 'send', verify: 'shield', alert: 'chat', reply: 'send', escalate: 'phone', call: 'phone', fail: 'alert' };
 
@@ -20,7 +21,7 @@ export function Timeline({ events, tz }) {
 }
 
 function SessionCard({ session, tz, now, isToday }) {
-  const { api, toast } = useApp();
+  const { api, toast, info } = useApp();
   const [busy, setBusy] = useState(false);
   const [showTimeline, setShowTimeline] = useState(false);
   const { data: timeline } = useData(showTimeline ? `/sessions/${session.id}/timeline` : null);
@@ -85,9 +86,11 @@ function SessionCard({ session, tz, now, isToday }) {
       )}
       {isToday && !session.verifiedAt && (
         <div className="session-actions">
-          <button className="btn ghost small" disabled={busy} onClick={() => run('start-now', 'Class timer started now')}>
-            <Icon name="play" /> Start class now
-          </button>
+          {info.mode === 'simulator' && (
+            <button className="btn ghost small" disabled={busy} onClick={() => run('start-now', 'Class timer started now')} title="Practice mode only: pretend the class starts now">
+              <Icon name="play" /> Start class now
+            </button>
+          )}
           {!session.submittedAt && (
             <button className="btn small" disabled={busy || !session.students.length} onClick={() => run('submit', 'Sent for the teacher')}>
               <Icon name="send" /> Send for teacher
@@ -96,32 +99,6 @@ function SessionCard({ session, tz, now, isToday }) {
         </div>
       )}
     </section>
-  );
-}
-
-/** The six steps from the reel, with today's numbers. */
-function Flow({ board }) {
-  const sent = board.sessions.filter((s) => s.submittedAt).length;
-  const verified = board.sessions.filter((s) => s.verifiedAt).length;
-  const st = board.stats;
-  const steps = [
-    { n: `${sent}/${board.sessions.length}`, label: 'Classes sent by teachers' },
-    { n: `${verified}/${board.sessions.length}`, label: 'Classes verified' },
-    { n: st.alertsSent, label: 'WhatsApp alerts sent' },
-    { n: st.replied, label: 'Parents replied' },
-    { n: st.replied, label: 'Records auto-updated' },
-    { n: st.openTasks, label: 'Calls pending', hot: st.openTasks > 0 },
-  ];
-  return (
-    <div className="flow" aria-label="Today's attendance flow">
-      {steps.map((s, i) => (
-        <div key={i} className={`flow-step ${s.hot ? 'hot' : ''}`}>
-          <div className="eyebrow"><span className="step-no">{i + 1}</span> Step {i + 1}</div>
-          <div className="flow-n">{s.n}</div>
-          <div className="flow-label">{s.label}</div>
-        </div>
-      ))}
-    </div>
   );
 }
 
@@ -193,34 +170,38 @@ function NeedsAttention() {
           ))}
         </ul>
       ) : (
-        <p className="muted small">Nobody is missing classes regularly. 🎉</p>
+        <p className="muted small">Nobody is missing classes regularly.</p>
       )}
     </section>
   );
 }
 
 export default function Dashboard() {
-  const { me } = useApp();
   const [date, setDate] = useState('');
   const { data, error } = useData(`/board${date ? `?date=${date}` : ''}`);
   const { data: report } = useData('/reports');
+  const { data: tasks } = useData('/tasks');
   const now = useNow();
 
   if (error) return <p className="error-text">{error.message}</p>;
   if (!data) return <Loading height={400} />;
   const { stats, settings, tz, sessions } = data;
   const isToday = data.date === data.today;
-  const hour = Number(new Intl.DateTimeFormat('en-GB', { hour: 'numeric', hour12: false, timeZone: tz }).format(new Date(now)));
-  const greeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
+  const status = isToday && tasks ? statusLine(dayWork(data, tasks, now), data) : null;
 
   return (
     <div className="stack">
       <div className="page-head" style={{ marginBottom: 0 }}>
         <div>
           <div className="eyebrow">{fmtDate(data.date, { weekday: 'long', day: 'numeric', month: 'long' })}</div>
-          <h1>{isToday ? `${greeting}, ${me.user.name.split(' ')[0]}` : `Attendance on ${fmtDate(data.date)}`}</h1>
-          <p className="muted">
-            Absentees are verified {settings.verifyAfterMinutes} min after class starts. Parents who don't reply within {settings.replyTimeoutMinutes} min become a call task.
+          <h1>{!isToday ? `Attendance on ${fmtDate(data.date)}` : status ? (status.act ? 'Needs attention today' : status.text) : 'Today'}</h1>
+          {status?.act && (
+            <p className="lead">
+              {status.text}. <a href="#/today">Open today's to-do list</a>
+            </p>
+          )}
+          <p className="muted small">
+            Parents are messaged {settings.verifyAfterMinutes} min after class starts, once the teacher sends the list. No reply in {settings.replyTimeoutMinutes} min means a phone call.
           </p>
         </div>
         <input className="input auto" type="date" value={date || data.date} max={data.today} onChange={(e) => setDate(e.target.value === data.today ? '' : e.target.value)} aria-label="Pick a date" />
@@ -235,7 +216,6 @@ export default function Dashboard() {
           </div>
         ) : null;
       })()}
-      {isToday && <Flow board={data} />}
       {isToday && <Impact report={report} />}
 
       <div className="dash-grid">
@@ -244,7 +224,7 @@ export default function Dashboard() {
             <Kpi label="Present" value={stats.present} tone="ok" hint={stats.late ? `${stats.late} arrived late` : undefined} />
             <Kpi label="Absent" value={stats.absent} tone="bad" />
             <Kpi label="On leave" value={stats.leave} tone="warn" />
-            <Kpi label="Informed after" value={stats.avgMinutesToAlert == null ? '–' : `${stats.avgMinutesToAlert}m`} hint="class start → WhatsApp" />
+            <Kpi label="Parents told within" value={stats.avgMinutesToAlert == null ? '–' : `${Math.round(stats.avgMinutesToAlert)} min`} hint="of class starting, on average" />
           </div>
           {sessions.length ? (
             <div className="sessions">

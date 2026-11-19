@@ -29,7 +29,7 @@ function useSave() {
 
 // ------------------------------------------------------------------ general
 function General() {
-  const { api } = useApp();
+  const { api, info } = useApp();
   const save = useSave();
   const { data } = useData('/settings');
   const [f, setF] = useState(null);
@@ -47,14 +47,14 @@ function General() {
         <label className="field">Institute name<input className="input" value={f.instituteName} onChange={set('instituteName')} /></label>
         <div className="grid2">
           <label className="field">
-            Verify absentees after (minutes)
+            Message parents after (minutes)
             <input className="input" type="number" min="0" max="240" step="any" value={f.verifyAfterMinutes} onChange={set('verifyAfterMinutes')} />
             <span className="hint">From class start, once the teacher has sent the list. Unsent classes never alert parents.</span>
           </label>
           <label className="field">
-            Call task if no reply in (minutes)
+            Call the parent if no reply in (minutes)
             <input className="input" type="number" min="0" max="240" step="any" value={f.replyTimeoutMinutes} onChange={set('replyTimeoutMinutes')} />
-            <span className="hint">Step 6: then it lands on the call list</span>
+            <span className="hint">Then the parent goes on the call list</span>
           </label>
         </div>
         <div className="divider" />
@@ -76,7 +76,7 @@ function General() {
           <button type="button" className="btn ghost" onClick={() => api.get('/digest/preview').then(setDigest)}>Preview summary</button>
           <button type="button" className="btn ghost" onClick={() => save(() => api.post('/digest/send'), 'Summary sent')} disabled={!data?.ownerPhone}>Send now</button>
         </div>
-        <p className="muted small">Tip for demos: set both timers to 0.5 and use “Start class now” on the dashboard.</p>
+        {info.mode === 'simulator' && <p className="muted small">Trying it out? Set both timers to 0.5 and press “Start class now” on Home.</p>}
       </form>
       {digest && (
         <Modal title="Today's summary" onClose={() => setDigest(null)}>
@@ -357,7 +357,7 @@ function MessageEditor() {
             <button className="btn ghost" onClick={() => setTpl('Dear {parent}, {student} has not been marked present in today\'s {batch} class ({time}) at {institute}. Please let us know.')}>English</button>
             <button className="btn ghost" onClick={() => setTpl('नमस्ते {parent}, आज की {batch} क्लास ({time}) में {student} की उपस्थिति दर्ज नहीं हुई। कृपया बताएं।')}>हिंदी</button>
           </div>
-          <p className="muted small">With an approved Meta template, WhatsApp shows the template's own wording instead; this text is used in the simulator and for interactive messages.</p>
+          <p className="muted small">Once WhatsApp is connected, parents see the wording WhatsApp approved for your account. This text is what practice mode shows, and what parents get when they've messaged you in the last 24 hours.</p>
         </div>
         <div className="phone mini">
           <div className="phone-head"><div className="avatar">MV</div><div><div className="phone-title">Mr. Verma</div><div className="phone-sub">Preview</div></div></div>
@@ -390,7 +390,7 @@ function WhatsAppSettings() {
     save(() => api.patch('/whatsapp', body), 'WhatsApp settings saved').then((r) => r && setF({ ...r, token: '', appSecret: '' }));
   };
   const disconnect = () => {
-    if (window.confirm('Disconnect WhatsApp? Messages will go to the simulator.')) save(() => api.patch('/whatsapp', { token: '', phoneNumberId: '' }), 'Disconnected').then((r) => r && setF({ ...r, token: '', appSecret: '' }));
+    if (window.confirm('Disconnect WhatsApp? The app goes back to practice mode and parents stop getting alerts.')) save(() => api.patch('/whatsapp', { token: '', phoneNumberId: '' }), 'Disconnected').then((r) => r && setF({ ...r, token: '', appSecret: '' }));
   };
   return (
     <div className="stack">
@@ -404,39 +404,48 @@ function WhatsAppSettings() {
           )}
           <div className="row between">
             <div>
-              <h2>WhatsApp Cloud API</h2>
-              <p className="muted small">Connect your institute's WhatsApp Business number from Meta. Until then, messages go to the simulator.</p>
+              <h2>WhatsApp Business</h2>
+              <p className="muted small">
+                {info.mode === 'whatsapp'
+                  ? 'Connected: parents get alerts from your institute’s WhatsApp number.'
+                  : 'Not connected yet, so the app runs in practice mode: messages stay inside the app (see WhatsApp in the menu) and no parent is contacted.'}
+              </p>
             </div>
-            <span className={`chip ${info.mode === 'whatsapp' ? 'ok' : 'warn'}`}>{info.mode === 'whatsapp' ? 'Connected' : 'Simulator'}</span>
+            <span className={`chip ${info.mode === 'whatsapp' ? 'ok' : 'warn'}`}>{info.mode === 'whatsapp' ? 'Connected' : 'Practice mode'}</span>
           </div>
-          <div className="grid2">
-            <label className="field">Phone number ID<input className="input" value={f.phoneNumberId} onChange={(e) => setF({ ...f, phoneNumberId: e.target.value })} placeholder="from WhatsApp → API setup" /></label>
-            <label className="field">WhatsApp number parents see<input className="input" inputMode="tel" value={f.displayPhone ?? ''} onChange={(e) => setF({ ...f, displayPhone: e.target.value })} placeholder="91 98765 43210" /><span className="hint">Used for the "send START" opt-in link and QR code.</span></label>
-            <label className="field">
-              Access token
-              <input className="input" type="password" value={f.token} onChange={(e) => setF({ ...f, token: e.target.value })} placeholder={data.token ? '•••••• saved (type to replace)' : 'Permanent access token'} autoComplete="off" />
-            </label>
-          </div>
-          <div className="grid2">
-            <label className="field">Absence alert template<input className="input" value={f.template} onChange={(e) => setF({ ...f, template: e.target.value })} placeholder="attendance_alert" /><span className="hint">Approved, with 3 quick replies: Leave, Late 15 min, Mujhe call karein</span></label>
-            <label className="field">Owner summary template<input className="input" value={f.digestTemplate ?? ''} onChange={(e) => setF({ ...f, digestTemplate: e.target.value })} placeholder="owner_summary" /><span className="hint">Approved, 8 values; without it the daily summary isn't sent</span></label>
-          </div>
-          <div className="grid2">
-            <label className="field">Template language<input className="input" value={f.templateLang} onChange={(e) => setF({ ...f, templateLang: e.target.value })} placeholder="en" /></label>
-          </div>
-          <div className="divider" />
-          <h3>Webhook (for parent replies)</h3>
-          <div className="field">
-            Callback URL
-            <div className="row" style={{ flexWrap: 'nowrap' }}>
-              <div className="code grow">{webhook}</div>
-              <button type="button" className="btn ghost small" onClick={() => navigator.clipboard?.writeText(webhook)}><Icon name="copy" /> Copy</button>
+          <label className="field">WhatsApp number parents see<input className="input" inputMode="tel" value={f.displayPhone ?? ''} onChange={(e) => setF({ ...f, displayPhone: e.target.value })} placeholder="91 98765 43210" /><span className="hint">Used for the "send START" link parents use to agree to alerts.</span></label>
+          <details className="tech" open={data.unreadable?.length > 0 || undefined}>
+            <summary>Technical setup <span className="muted small">for whoever sets up your WhatsApp Business account with Meta</span></summary>
+            <div className="stack" style={{ marginTop: 12 }}>
+              <div className="grid2">
+                <label className="field">Phone number ID<input className="input" value={f.phoneNumberId} onChange={(e) => setF({ ...f, phoneNumberId: e.target.value })} placeholder="from WhatsApp → API setup" /></label>
+                <label className="field">
+                  Access token
+                  <input className="input" type="password" value={f.token} onChange={(e) => setF({ ...f, token: e.target.value })} placeholder={data.token ? '•••••• saved (type to replace)' : 'Permanent access token'} autoComplete="off" />
+                  <span className="hint">Stored encrypted.</span>
+                </label>
+              </div>
+              <div className="grid2">
+                <label className="field">Absence alert template<input className="input" value={f.template} onChange={(e) => setF({ ...f, template: e.target.value })} placeholder="attendance_alert" /><span className="hint">Approved, with 3 quick replies: Leave, Late 15 min, Mujhe call karein</span></label>
+                <label className="field">Owner summary template<input className="input" value={f.digestTemplate ?? ''} onChange={(e) => setF({ ...f, digestTemplate: e.target.value })} placeholder="owner_summary" /><span className="hint">Approved, 8 values; without it the daily summary isn't sent</span></label>
+              </div>
+              <div className="grid2">
+                <label className="field">Template language<input className="input" value={f.templateLang} onChange={(e) => setF({ ...f, templateLang: e.target.value })} placeholder="en" /></label>
+              </div>
+              <h3>Webhook (for parent replies)</h3>
+              <div className="field">
+                Callback URL
+                <div className="row" style={{ flexWrap: 'nowrap' }}>
+                  <div className="code grow">{webhook}</div>
+                  <button type="button" className="btn ghost small" onClick={() => navigator.clipboard?.writeText(webhook)}><Icon name="copy" /> Copy</button>
+                </div>
+              </div>
+              <div className="grid2">
+                <label className="field">Verify token<input className="input" value={f.verifyToken} onChange={(e) => setF({ ...f, verifyToken: e.target.value })} placeholder="any phrase; paste the same in Meta" /></label>
+                <label className="field">App secret<input className="input" type="password" value={f.appSecret} onChange={(e) => setF({ ...f, appSecret: e.target.value })} placeholder={data.appSecret ? '•••••• saved' : 'required: replies are rejected without it'} autoComplete="off" /><span className="hint">From Meta App settings → Basic. Parent replies are only accepted when signed with it. Stored encrypted.</span></label>
+              </div>
             </div>
-          </div>
-          <div className="grid2">
-            <label className="field">Verify token<input className="input" value={f.verifyToken} onChange={(e) => setF({ ...f, verifyToken: e.target.value })} placeholder="any phrase; paste the same in Meta" /></label>
-            <label className="field">App secret<input className="input" type="password" value={f.appSecret} onChange={(e) => setF({ ...f, appSecret: e.target.value })} placeholder={data.appSecret ? '•••••• saved' : 'required: replies are rejected without it'} autoComplete="off" /><span className="hint">From Meta App settings → Basic. Parent replies are only accepted when signed with it.</span></label>
-          </div>
+          </details>
           <div className="row">
             <button className="btn primary">Save</button>
             {info.mode === 'whatsapp' && <button type="button" className="btn ghost" style={{ color: 'var(--red)' }} onClick={disconnect}>Disconnect</button>}

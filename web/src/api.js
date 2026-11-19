@@ -161,7 +161,7 @@ export function initials(name = '') {
 
 /** Stable pleasant colour per name, for avatars. */
 export function colorFor(name = '') {
-  const palette = ['#2e7d4f', '#1769aa', '#8e44ad', '#c0392b', '#d35400', '#16a085', '#2c3e50', '#7d5a2e'];
+  const palette = ['#2e7d4f', '#1769aa', '#8e44ad', '#c0392b', '#b34700', '#0f7a65', '#2c3e50', '#7d5a2e'];
   let h = 0;
   for (const c of name) h = (h * 31 + c.charCodeAt(0)) >>> 0;
   return palette[h % palette.length];

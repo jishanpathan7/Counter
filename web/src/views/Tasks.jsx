@@ -10,7 +10,7 @@ const OUTCOMES = [
   { id: 'unreachable', label: 'Unreachable', tone: '' },
 ];
 
-function TaskCard({ task, now }) {
+export function TaskCard({ task, now }) {
   const { api, toast } = useApp();
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);

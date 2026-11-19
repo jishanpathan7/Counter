@@ -1072,6 +1072,11 @@ export class AttendanceService {
       date,
     );
     const openTasks = one("SELECT COUNT(*) AS n FROM tasks WHERE status = 'open'").n;
+    const callsDone = one(
+      `SELECT COUNT(*) AS n FROM tasks t JOIN alerts al ON al.id = t.alert_id JOIN sessions se ON se.id = al.session_id
+        WHERE se.date = ? AND t.status = 'done'`,
+      date,
+    ).n;
     return {
       present: (att.onTime ?? 0) + (att.late ?? 0), // late students did attend
       late: att.late ?? 0,
@@ -1084,6 +1089,7 @@ export class AttendanceService {
       escalated: al.escalated ?? 0,
       avgMinutesToAlert: al.avgMinutesToAlert == null ? null : Math.round(al.avgMinutesToAlert * 10) / 10,
       openTasks,
+      callsDone,
     };
   }
 
@@ -1502,7 +1508,7 @@ export class AttendanceService {
              FROM attendance WHERE session_id = ?`,
         )
         .get(s.id);
-      push(s.verified_at, 'verify', `Verified: ${(c.P ?? 0) + (c.T ?? 0)} present (${c.T ?? 0} late), ${c.A ?? 0} absent, ${c.L ?? 0} on leave`);
+      push(s.verified_at, 'verify', `Attendance final: ${(c.P ?? 0) + (c.T ?? 0)} present (${c.T ?? 0} late), ${c.A ?? 0} absent, ${c.L ?? 0} on leave`);
     }
     const alerts = this.db
       .prepare(
@@ -1517,7 +1523,7 @@ export class AttendanceService {
       push(a.sent_at, a.status === 'failed' ? 'fail' : 'alert', a.status === 'failed' ? `WhatsApp to ${parent} failed (${a.name})` : `WhatsApp sent to ${parent} about ${a.name}`, who);
       if (a.replied_at && a.reply === 'MISSING') push(a.replied_at, 'escalate', `${parent} doesn't know where ${a.name} is: urgent call`, who);
       else if (a.replied_at) push(a.replied_at, 'reply', `${parent} replied: ${REPLY_OPTIONS[a.reply]?.title ?? a.reply}`, who);
-      if (a.escalated_at) push(a.escalated_at, 'escalate', `No reply from ${parent}: call task created`, who);
+      if (a.escalated_at) push(a.escalated_at, 'escalate', `No reply from ${parent}: added to the call list`, who);
       if (a.done_at) push(a.done_at, 'call', `Staff called about ${a.name}: ${a.outcome}`, who);
     }
     return ev.sort((x, y) => (x.at < y.at ? -1 : x.at > y.at ? 1 : 0));

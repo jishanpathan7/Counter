@@ -277,7 +277,7 @@ function Import({ batches, onClose }) {
           Paste from Excel / Google Sheets, or upload a CSV. One student per line: <b>name, parent name, phone, batch</b>. The batch column is optional;
           rows without it go into the batch you pick below.
         </p>
-        <textarea className="textarea" style={{ minHeight: 160, fontFamily: 'ui-monospace, monospace', fontSize: 13 }} value={csv} onChange={(e) => { setCsv(e.target.value); setPreview(null); }} placeholder={'Aarav Sharma, Mr. Sharma, 98765 43210, Class 10 · Batch B\nDiya Iyer, Mrs. Iyer, 98765 43211'} />
+        <textarea className="textarea" style={{ minHeight: 160, fontFamily: 'ui-monospace, monospace', fontSize: 14 }} value={csv} onChange={(e) => { setCsv(e.target.value); setPreview(null); }} placeholder={'Aarav Sharma, Mr. Sharma, 98765 43210, Class 10 · Batch B\nDiya Iyer, Mrs. Iyer, 98765 43211'} />
         <div className="row">
           <label className="btn ghost small"><Icon name="upload" /> Upload CSV<input type="file" accept=".csv,.txt,text/csv" hidden onChange={(e) => readFile(e.target.files?.[0])} /></label>
           <label className="row small">Default batch

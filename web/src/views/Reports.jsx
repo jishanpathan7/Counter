@@ -83,8 +83,8 @@ export default function Reports() {
           <div className="kpis">
             <Kpi label="Attendance" value={r.totals.pct == null ? '–' : `${r.totals.pct}%`} tone={r.totals.pct < 75 ? 'bad' : 'ok'} hint={`${r.totals.P + r.totals.T} of ${r.totals.total} attended (${r.totals.T} late)`} />
             <Kpi label="WhatsApp alerts" value={r.alerts.sent} hint={`${r.alerts.replyRate ?? 0}% replied`} />
-            <Kpi label="Avg reply time" value={r.alerts.avgReplyMin == null ? '–' : `${r.alerts.avgReplyMin}m`} hint="alert → parent reply" />
-            <Kpi label="Informed after" value={r.alerts.avgMinToAlert == null ? '–' : `${r.alerts.avgMinToAlert}m`} hint={`${fmtDuration(r.alerts.avgMinBeforeClassEnd)} before class ends`} tone="ok" />
+            <Kpi label="Parents reply in" value={r.alerts.avgReplyMin == null ? '–' : `${r.alerts.avgReplyMin} min`} hint="on average, after the WhatsApp" />
+            <Kpi label="Parents told within" value={r.alerts.avgMinToAlert == null ? '–' : `${Math.round(r.alerts.avgMinToAlert)} min`} hint={`${fmtDuration(r.alerts.avgMinBeforeClassEnd)} before class ends`} tone="ok" />
             <Kpi label="Calls made" value={r.calls.done} hint={`${r.calls.unreachable} unreachable`} />
             <Kpi label="Bunks caught" value={r.calls.bunks} tone={r.calls.bunks ? 'bad' : ''} />
           </div>

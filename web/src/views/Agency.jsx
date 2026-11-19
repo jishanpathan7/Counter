@@ -185,7 +185,7 @@ export default function Agency({ me, logout, theme, toast }) {
                     <div className="row small muted">
                       <span>Today: <b className="s-P">{i.today.present}</b> present · <b className="s-A">{i.today.absent}</b> absent</span>
                       {i.today.openTasks > 0 && <span className="chip bad">{i.today.openTasks} calls pending</span>}
-                      <span className={`chip ${i.whatsapp === 'whatsapp' ? 'ok' : ''}`}>{i.whatsapp === 'whatsapp' ? 'WhatsApp live' : 'Simulator'}</span>
+                      <span className={`chip ${i.whatsapp === 'whatsapp' ? 'ok' : ''}`}>{i.whatsapp === 'whatsapp' ? 'WhatsApp live' : 'Practice mode'}</span>
                     </div>
                     <div className="row between" style={{ borderTop: '1px solid var(--line)', paddingTop: 12 }}>
                       <button className="link" onClick={() => setEditing(i)}>{fmtMoney(i.feeMonthly)}/month</button>

@@ -7,7 +7,7 @@ function Hero() {
     <section className="auth-hero">
       <div className="row" style={{ gap: 12 }}>
         <div className="brand-mark" style={{ background: '#fff', color: 'var(--green)' }}><Icon name="check" /></div>
-        <b style={{ fontSize: 18 }}>Attendance Alert</b>
+        <b style={{ fontSize: 20 }}>Attendance Alert</b>
       </div>
       <div className="stack">
         <h1>
@@ -15,13 +15,13 @@ function Hero() {
         </h1>
         <p>
           Teachers mark attendance on their phone. Parents of absent students get a WhatsApp in minutes, reply with
-          one tap, and the register updates itself. No reply? Your front desk gets a call task.
+          one tap, and the register updates itself. No reply? The front desk is told to call.
         </p>
       </div>
       <div className="hero-steps">
-        <div className="hero-step"><b>10 min</b>after class starts, absentees are verified</div>
-        <div className="hero-step"><b>1 tap</b>for parents: “Leave” or “Late 15 min”</div>
-        <div className="hero-step"><b>0</b>students slipping through the gap</div>
+        <div className="hero-step"><b>10 min</b>after class starts, parents of absent students get a WhatsApp</div>
+        <div className="hero-step"><b>1 tap</b>for parents: “Leave”, “Late” or “Call me”</div>
+        <div className="hero-step"><b>1 list</b>of parents to call when someone doesn’t reply</div>
       </div>
     </section>
   );

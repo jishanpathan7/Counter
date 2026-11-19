@@ -36,11 +36,11 @@ export default function Messages() {
     <div>
       <div className="page-head">
         <div>
-          <h1>{simulator ? 'WhatsApp simulator' : 'WhatsApp'}</h1>
+          <h1>{simulator ? 'WhatsApp (practice)' : 'WhatsApp'}</h1>
           <p className="muted">
             {simulator
               ? 'No WhatsApp account is connected yet, so messages land here. Tap a reply button as the parent and watch the register update.'
-              : 'Every alert sent and reply received through the WhatsApp Cloud API.'}
+              : 'Every message sent to parents and every reply.'}
           </p>
         </div>
         {simulator && info.role === 'owner' && <a className="btn ghost" href="#/settings/whatsapp"><Icon name="wifi" /> Connect WhatsApp</a>}
@@ -48,7 +48,7 @@ export default function Messages() {
 
       {!threads && <Loading height={300} />}
       {threads && !threads.length && (
-        <Empty title="No messages yet" icon="chat">Alerts appear here once a class is verified and someone is absent.</Empty>
+        <Empty title="No messages yet" icon="chat">Messages appear here once a teacher sends a class with someone absent.</Empty>
       )}
 
       {threads?.length > 0 && (

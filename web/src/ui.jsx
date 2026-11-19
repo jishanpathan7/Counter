@@ -5,6 +5,7 @@ import { colorFor, fmtCountdown, fmtTime, initials } from './api.js';
 const PATHS = {
   check: 'M5 12.5l4.5 4.5L19 7.5',
   grid: 'M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z',
+  more: 'M4 6h16M4 12h16M4 18h16',
   users: 'M16 19v-1.5a3.5 3.5 0 00-3.5-3.5h-5A3.5 3.5 0 004 17.5V19M10 10.5a3.25 3.25 0 100-6.5 3.25 3.25 0 000 6.5zM20 19v-1.5a3.5 3.5 0 00-2.6-3.38M15.5 4.2a3.25 3.25 0 010 6.1',
   phone: 'M5 4h3.5l1.6 4.2-2.1 1.3a11 11 0 005.5 5.5l1.3-2.1L19 14.5V18a2 2 0 01-2 2C10 20 4 14 4 6a2 2 0 011-2z',
   chat: 'M4 18.5V6a2 2 0 012-2h12a2 2 0 012 2v9a2 2 0 01-2 2H8l-4 3.5zM8.5 9.5h7M8.5 12.5h4',
@@ -90,7 +91,7 @@ export function AlertState({ alert, task, now, tz }) {
     return (
       <span className="alert-state wait">
         {alert.delivery === 'read' ? 'Read by parent ✓✓' : alert.delivery === 'delivered' ? 'Delivered ✓✓' : 'WhatsApp sent ✓'} {fmtTime(alert.sentAt, tz)} ·{' '}
-        {left > 0 ? `waiting for reply ${fmtCountdown(left)}` : 'escalating…'}
+        {left > 0 ? `call in ${fmtCountdown(left)} if no reply` : 'moving to calls…'}
       </span>
     );
   }
@@ -101,18 +102,18 @@ export function AlertState({ alert, task, now, tz }) {
     : 'WhatsApp failed';
   return (
     <span className="alert-state bad" title={alert.error || undefined}>
-      {reason} → {task?.status === 'done' ? `called: ${task.outcome}` : 'staff call task'}
+      {reason} → {task?.status === 'done' ? `called: ${task.outcome}` : 'call the parent'}
     </span>
   );
 }
 
 export function SessionBadge({ session, now, tz }) {
-  if (session.verifiedAt) return <span className="chip ok">Verified · {fmtTime(session.verifiedAt, tz)}</span>;
+  if (session.verifiedAt) return <span className="chip ok">Done · {fmtTime(session.verifiedAt, tz)}</span>;
   const toStart = Date.parse(session.startsAt) - now;
   const left = Date.parse(session.verifyDueAt) - now;
-  if (session.submittedAt) return <span className="chip live">Sent · alerts in {fmtCountdown(left)}</span>;
+  if (session.submittedAt) return <span className="chip live">Sent · parents messaged in {fmtCountdown(left)}</span>;
   if (toStart > 0) return <span className="chip">Starts {fmtTime(session.startsAt, tz)}</span>;
-  if (left > 0) return <span className="chip warn pulse">Teacher marking · due in {fmtCountdown(left)}</span>;
+  if (left > 0) return <span className="chip warn pulse">Teacher marking · {fmtCountdown(left)} left</span>;
   return <span className="chip bad pulse">Not sent by teacher</span>;
 }
 
