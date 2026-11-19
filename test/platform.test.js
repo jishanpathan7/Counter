@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Platform } from '../server/platform.js';
 import { createApp, createEventHub } from '../server/app.js';
-import { seedDemo } from '../server/seed.js';
+import { DEMO_PIN, seedDemo } from '../server/seed.js';
+import { hashPin } from '../server/platform.js';
 import { createRuntime } from '../server/runtime.js';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -11,20 +12,20 @@ import path from 'node:path';
 
 const quiet = { error() {} };
 
-async function start(tt, { seed = true } = {}) {
+async function start(tt, { seed = true, demo = seed, trustProxy = false } = {}) {
   const now = Date.parse('2026-11-18T12:00:00Z'); // 5:30 PM IST
   const platform = new Platform({ clock: () => now, logger: quiet });
   if (seed) seedDemo(platform);
-  const app = createApp({ platform, hub: createEventHub(), demo: seed, logger: quiet });
+  const app = createApp({ platform, hub: createEventHub(), demo, trustProxy, logger: quiet });
   const server = app.listen(0);
   tt.after(() => server.close());
   const base = `http://127.0.0.1:${server.address().port}`;
-  const client = () => {
+  const client = ({ ip } = {}) => {
     let cookie = '';
     const call = async (method, p, body) => {
       const r = await fetch(`${base}${p}`, {
         method,
-        headers: { cookie, 'Content-Type': 'application/json' },
+        headers: { cookie, 'Content-Type': 'application/json', ...(ip ? { 'x-forwarded-for': ip } : {}) },
         body: body === undefined ? undefined : JSON.stringify(body),
       });
       const set = r.headers.get('set-cookie');
@@ -34,7 +35,12 @@ async function start(tt, { seed = true } = {}) {
       try { data = JSON.parse(text); } catch { data = text; }
       return { status: r.status, body: data, headers: r.headers };
     };
-    return { call, login: (phone, pin = '1234') => call('POST', '/api/auth/login', { phone, pin }) };
+    return {
+      call,
+      login: (phone, pin = DEMO_PIN) => call('POST', '/api/auth/login', { phone, pin }),
+      getCookie: () => cookie,
+      setCookie: (c) => (cookie = c),
+    };
   };
   return { platform, client, base };
 }
@@ -55,13 +61,13 @@ test('first-run setup creates the admin and first institute, once', async (tt) =
   const { client } = await start(tt, { seed: false });
   const c = client();
   assert.equal((await c.call('GET', '/api/auth/me')).body.needsSetup, true);
-  const r = await c.call('POST', '/api/setup', { name: 'Me', phone: '9811111111', pin: '4321', instituteName: 'Star Classes' });
+  const r = await c.call('POST', '/api/setup', { name: 'Me', phone: '9811111111', pin: '739154', instituteName: 'Star Classes' });
   assert.equal(r.status, 201);
   assert.equal(r.body.institute.slug, 'star-classes');
   const me = await c.call('GET', '/api/auth/me');
   assert.equal(me.body.user.isAgency, true);
   assert.equal(me.body.memberships[0].slug, 'star-classes');
-  assert.equal((await c.call('POST', '/api/setup', { name: 'X', phone: '9822222222', pin: '1111', instituteName: 'Y' })).status, 409);
+  assert.equal((await c.call('POST', '/api/setup', { name: 'X', phone: '9822222222', pin: '628403', instituteName: 'Y' })).status, 409);
 });
 
 test('login, wrong PIN lockout, logout', async (tt) => {
@@ -69,7 +75,7 @@ test('login, wrong PIN lockout, logout', async (tt) => {
   const c = client();
   assert.equal((await c.call('GET', '/api/i/bright-future/board')).status, 401);
   for (let i = 0; i < 5; i++) assert.equal((await c.login('9999900001', '0000')).status, 401);
-  assert.equal((await c.login('9999900001', '1234')).status, 429);
+  assert.equal((await c.login('9999900001', DEMO_PIN)).status, 429);
   const d = client();
   assert.equal((await d.login('9999900002')).status, 200);
   assert.equal((await d.call('GET', '/api/i/bright-future/board')).status, 200);
@@ -125,13 +131,13 @@ test('agency creates an institute with a new owner who can log in', async (tt) =
   const agency = client();
   await agency.login('9999900000');
   const r = await agency.call('POST', '/api/agency/institutes', {
-    name: 'Sharma Tutorials', city: 'Pune', feeMonthly: 9000, ownerName: 'Neha Sharma', ownerPhone: '9822000000', ownerPin: '5555',
+    name: 'Sharma Tutorials', city: 'Pune', feeMonthly: 9000, ownerName: 'Neha Sharma', ownerPhone: '9822000000', ownerPin: '583920',
   });
   assert.equal(r.status, 201);
   assert.equal(r.body.slug, 'sharma-tutorials');
   assert.equal((await agency.call('GET', '/api/agency/overview')).body.totals.mrr, 27000);
   const owner = client();
-  const login = await owner.login('9822000000', '5555');
+  const login = await owner.login('9822000000', '583920');
   assert.deepEqual(login.body.memberships.map((m) => [m.slug, m.role]), [['sharma-tutorials', 'owner']]);
 });
 
@@ -139,13 +145,13 @@ test('team management keeps at least one owner', async (tt) => {
   const { client } = await start(tt);
   const owner = client();
   const me = (await owner.login('9999900001')).body.user;
-  const added = await owner.call('POST', '/api/i/bright-future/team', { name: 'Ravi Sir', phone: '9833000000', pin: '2468', role: 'teacher' });
+  const added = await owner.call('POST', '/api/i/bright-future/team', { name: 'Ravi Sir', phone: '9833000000', pin: '613478', role: 'teacher' });
   assert.equal(added.status, 201);
   assert.equal((await owner.call('PATCH', `/api/i/bright-future/team/${me.id}`, { role: 'staff' })).status, 409);
   assert.equal((await owner.call('DELETE', `/api/i/bright-future/team/${me.id}`)).status, 409);
   assert.equal((await owner.call('DELETE', `/api/i/bright-future/team/${added.body.id}`)).status, 204);
   const ravi = client();
-  assert.equal((await ravi.login('9833000000', '2468')).body.memberships.length, 0);
+  assert.equal((await ravi.login('9833000000', '613478')).body.memberships.length, 0);
 });
 
 test('simulator reply, CSV export, WhatsApp settings never leak secrets', async (tt) => {
@@ -188,20 +194,20 @@ test('owners cannot take over accounts that belong to another institute or the a
   await owner.login('9999900001');
 
   // The agency admin can't be added at all.
-  assert.equal((await owner.call('POST', '/api/i/bright-future/team', { name: 'x', phone: '9999900000', pin: '1111', role: 'staff' })).status, 409);
+  assert.equal((await owner.call('POST', '/api/i/bright-future/team', { name: 'x', phone: '9999900000', pin: '628403', role: 'staff' })).status, 409);
 
   // Another institute's owner can be added, but their name and PIN stay theirs.
-  const added = await owner.call('POST', '/api/i/bright-future/team', { name: 'Fake Name', phone: '9999900004', pin: '1111', role: 'staff' });
+  const added = await owner.call('POST', '/api/i/bright-future/team', { name: 'Fake Name', phone: '9999900004', pin: '628403', role: 'staff' });
   assert.equal(added.status, 201);
   assert.equal(added.body.sharedAccount, true);
-  assert.equal((await owner.call('PATCH', `/api/i/bright-future/team/${added.body.id}`, { pin: '4321' })).status, 403);
+  assert.equal((await owner.call('PATCH', `/api/i/bright-future/team/${added.body.id}`, { pin: '846213' })).status, 403);
   assert.equal((await owner.call('PATCH', `/api/i/bright-future/team/${added.body.id}`, { name: 'Hacked' })).status, 403);
   // Role changes are still fine.
   assert.equal((await owner.call('PATCH', `/api/i/bright-future/team/${added.body.id}`, { role: 'teacher' })).status, 200);
 
   const victim = client();
-  assert.equal((await victim.login('9999900004', '4321')).status, 401, 'attacker PIN does not work');
-  assert.equal((await victim.login('9999900004', '1234')).status, 200, 'original PIN still works');
+  assert.equal((await victim.login('9999900004', '846213')).status, 401, 'attacker PIN does not work');
+  assert.equal((await victim.login('9999900004', DEMO_PIN)).status, 200, 'original PIN still works');
   assert.equal((await victim.call('GET', '/api/auth/me')).body.user.name, 'Sunita Verma');
 
   // Removing them from this institute doesn't sign them out of their own.
@@ -258,4 +264,61 @@ test('production runtime: secret required, no demo data, setup needs the code', 
     body: JSON.stringify({ name: 'Admin', phone: '9811111111', pin: '482915', instituteName: 'Star Classes', setupCode: code }) });
   assert.equal((await setup('guess')).status, 403);
   assert.equal((await setup('open-sesame')).status, 201);
+});
+
+test('new PINs must be 6+ digits and hard to guess', async (tt) => {
+  const { client } = await start(tt, { seed: false });
+  const c = client();
+  const setup = (pin, phone = '9811111111') => c.call('POST', '/api/setup', { name: 'Me', phone, pin, instituteName: 'Star Classes' });
+  for (const weak of ['1234', '123456', '111111', '654321', '121212', '123123', '111111', '811111']) {
+    assert.equal((await setup(weak)).status, 400, `${weak} should be refused`);
+  }
+  assert.match((await setup('111111')).body.error, /repeated/);
+  assert.match((await setup('811111', '9811811111')).body.error, /part of your mobile number/);
+  assert.equal((await setup('739154')).status, 201);
+  assert.equal((await c.call('POST', '/api/i/star-classes/team', { name: 'T', phone: '9822000000', pin: '1234', role: 'teacher' })).status, 400);
+});
+
+test('someone with an old 4-digit PIN must set a new one before doing anything else', async (tt) => {
+  const { client, platform } = await start(tt, { demo: false });
+  platform.db.prepare('UPDATE users SET pin_hash = ? WHERE phone = ?').run(hashPin('1234'), '919999900002');
+  const desk = client();
+  const login = await desk.login('9999900002', '1234');
+  assert.equal(login.status, 200);
+  assert.equal(login.body.user.mustChangePin, true);
+  assert.equal((await desk.call('GET', '/api/i/bright-future/board')).status, 403);
+  assert.equal((await desk.call('POST', '/api/auth/pin', { current: '1234', next: '123456' })).status, 400, 'weak new PIN refused');
+  assert.equal((await desk.call('POST', '/api/auth/pin', { current: '1234', next: '582047' })).status, 200);
+  assert.equal((await desk.call('GET', '/api/auth/me')).body.user.mustChangePin, false);
+  assert.equal((await desk.call('GET', '/api/i/bright-future/board')).status, 200);
+});
+
+test('logging out ends the session, even for a copied cookie', async (tt) => {
+  const { client } = await start(tt);
+  const a = client();
+  await a.login('9999900001');
+  const stolen = a.getCookie();
+  await a.call('POST', '/api/auth/logout');
+  const thief = client();
+  thief.setCookie(stolen);
+  assert.equal((await thief.call('GET', '/api/i/bright-future/board')).status, 401);
+});
+
+test('login limits: a phone is protected across many addresses, and one person can\'t lock everyone out', async (tt) => {
+  const { client } = await start(tt, { trustProxy: true });
+  // Five wrong PINs from one device lock that device for that phone...
+  const attacker = client({ ip: '203.0.113.1' });
+  for (let i = 0; i < 5; i++) await attacker.login('9999900001', '000000');
+  assert.equal((await attacker.login('9999900001')).status, 429);
+  // ...but the real owner on their own phone can still sign in.
+  assert.equal((await client({ ip: '198.51.100.7' }).login('9999900001')).status, 200);
+
+  // Guessing from many addresses: after 20 failures for one phone, it's locked everywhere.
+  for (let i = 0; i < 20; i++) await client({ ip: `203.0.113.${10 + i}` }).login('9999900002', '000000');
+  assert.equal((await client({ ip: '198.51.100.8' }).login('9999900002')).status, 429);
+
+  // Spraying many phones from one address: locked after 30 failures.
+  const sprayer = client({ ip: '203.0.113.200' });
+  for (let i = 0; i < 30; i++) await sprayer.login(`98000${String(i).padStart(5, '0')}`, '000000');
+  assert.equal((await sprayer.login('9999900003')).status, 429);
 });

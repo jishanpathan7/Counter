@@ -27,6 +27,7 @@ function setup({ failSend = false } = {}) {
   for (const [name, phone] of [['Aarav', '9000000001'], ['Diya', '9000000002'], ['Rohan', '9000000003'], ['Meera', '9000000004']]) {
     ids[name] = service.createStudent({ batchId: batch.id, name, parentName: `${name} parent`, parentPhone: phone }).id;
   }
+  service.recordAllConsents({ recordedBy: 'test' }); // parents agreed on the admission form
   const session = service.ensureSession(batch.id);
   return {
     service,
@@ -495,4 +496,55 @@ test('owner summary goes out with template values', async () => {
   const msg = t.sent.find((m) => m.to === '919000000099');
   assert.equal(msg.template, 'digest');
   assert.deepEqual(msg.params, ['My Coaching Institute', '18 Nov', 3, 1, 0, 1, 0, 0]);
+});
+
+test('consent: no WhatsApp without it, START turns alerts on, STOP turns them off for good', async () => {
+  const t = setup();
+  const { service, ids } = t;
+  service.clearConsent(ids.Rohan, { recordedBy: 'test' });
+  assert.equal(service.consentFor('9000000003'), null);
+
+  // Day 1: no consent yet, so no WhatsApp; staff get a call instead.
+  await service.markAll(t.session.id, 'P');
+  await service.mark(t.session.id, ids.Rohan, 'A');
+  await service.verify(t.session.id);
+  assert.equal(t.sent.length, 0);
+  assert.equal(t.student('Rohan').alert.status, 'failed');
+  assert.match(service.listTasks('open')[0].reason, /no WhatsApp consent/);
+
+  // The parent sends START (e.g. from the admission QR code).
+  const r = await service.handleReply({ phone: '9000000003', text: 'START' });
+  assert.equal(r.consent, 'opted_in');
+  assert.equal(service.consentFor('9000000003').source, 'whatsapp');
+  assert.match(t.sent.at(-1).text, /Rohan ke attendance alerts/);
+
+  // Day 2: now the alert goes out on WhatsApp.
+  t.advance(24 * 60 * 60_000);
+  const day2 = service.ensureSession(t.batch.id);
+  await service.markAll(day2.id, 'P');
+  await service.mark(day2.id, ids.Rohan, 'A');
+  await service.verify(day2.id);
+  assert.ok(t.sent.some((m) => m.to === '919000000003' && m.buttons));
+
+  // STOP: no more alerts, even with the consent rule switched off, and staff can't override it.
+  await service.handleReply({ phone: '9000000003', text: 'stop' });
+  assert.equal(service.consentFor('9000000003').status, 'opted_out');
+  assert.throws(() => service.recordConsent(ids.Rohan), /sent STOP/);
+  service.updateSettings({ requireConsent: false });
+  t.advance(24 * 60 * 60_000);
+  const day3 = service.ensureSession(t.batch.id);
+  await service.markAll(day3.id, 'P');
+  await service.mark(day3.id, ids.Rohan, 'A');
+  const before = t.sent.length;
+  await service.verify(day3.id);
+  assert.equal(t.sent.length, before, 'opted-out parents are never messaged');
+  assert.match(service.getSessionView(day3.id).students.find((s) => s.name === 'Rohan').alert.error, /STOP/);
+
+  // An unknown number can't opt itself in.
+  await service.handleReply({ phone: '9876500000', text: 'start' });
+  assert.equal(service.consentFor('9876500000'), null);
+  assert.match(t.sent.at(-1).text, /records mein nahi mila/);
+
+  const log = service.db.prepare('SELECT status, source FROM consent_log WHERE phone = ? ORDER BY id').all('919000000003');
+  assert.deepEqual(log.map((l) => `${l.status}/${l.source}`), ['opted_in/staff', 'cleared/staff', 'opted_in/whatsapp', 'opted_out/whatsapp']);
 });

@@ -94,9 +94,13 @@ export function AlertState({ alert, task, now, tz }) {
       </span>
     );
   }
-  const reason = alert.status === 'failed' ? 'WhatsApp failed' : 'No reply';
+  const reason =
+    alert.status !== 'failed' ? 'No reply'
+    : /STOP/.test(alert.error ?? '') ? 'Parent turned off WhatsApp (STOP)'
+    : /consent/i.test(alert.error ?? '') ? 'No WhatsApp consent'
+    : 'WhatsApp failed';
   return (
-    <span className="alert-state bad">
+    <span className="alert-state bad" title={alert.error || undefined}>
       {reason} → {task?.status === 'done' ? `called: ${task.outcome}` : 'staff call task'}
     </span>
   );
@@ -209,4 +213,12 @@ export function useTheme() {
   }, [theme]);
   const isDark = theme === 'dark' || (theme === 'auto' && window.matchMedia?.('(prefers-color-scheme: dark)').matches);
   return { theme, isDark, toggle: () => setTheme(isDark ? 'light' : 'dark') };
+}
+
+/** Has this parent agreed to WhatsApp alerts? */
+export const CONSENT_LABEL = { opted_in: 'Agreed', opted_out: 'Said STOP', pending: 'Not asked' };
+export function ConsentChip({ status }) {
+  const st = status || 'pending';
+  const kind = st === 'opted_in' ? 'ok' : st === 'opted_out' ? 'bad' : 'warn';
+  return <span className={`chip ${kind}`}>{CONSENT_LABEL[st]}</span>;
 }

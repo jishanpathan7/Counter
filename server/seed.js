@@ -1,7 +1,7 @@
 import { REPLY_OPTIONS, TASK_OUTCOMES } from './service.js';
 import { addDays, zonedTimeToIso } from './time.js';
 
-export const DEMO_PIN = '1234';
+export const DEMO_PIN = '482915';
 export const DEMO_LOGINS = [
   { role: 'Agency admin', name: 'Agency Admin', phone: '9999900000' },
   { role: 'Institute owner', name: 'Rakesh Sharma', phone: '9999900001' },
@@ -174,6 +174,12 @@ export function seedDemo(platform) {
   const bf = platform.service('bright-future');
   bf.updateSettings({ ownerPhone: '9999900001', digestEnabled: true, digestTime: '21:00' });
   const { batches, rates } = addBatches(bf, BRIGHT_FUTURE);
+  // Most parents agreed on the admission form; one hasn't yet and one sent STOP, to show both cases.
+  bf.recordAllConsents({ recordedBy: 'Admission desk' });
+  const phoneOf = (name) => bf.listStudents().find((x) => x.name === name).parentPhone;
+  for (const t of ['consents', 'consent_log']) bf.db.prepare(`DELETE FROM ${t} WHERE phone = ?`).run(phoneOf('Sara Ali'));
+  bf.setConsent(phoneOf('Nisha Pillai'), 'opted_out', { source: 'whatsapp' });
+  bf.updateWhatsAppConfig({ displayPhone: '919999988888' }); // demo number for the "send START" link
   platform.addMember('bright-future', { name: 'Pooja Desai', phone: '9999900002', pin: DEMO_PIN, role: 'staff' });
   platform.addMember('bright-future', { name: 'Anil Sir', phone: '9999900003', pin: DEMO_PIN, role: 'teacher', batchIds: [batches[1].id, batches[2].id] });
   // Batch B (the class from the reel) is left open today so you can run the live flow at any hour.
@@ -185,6 +191,7 @@ export function seedDemo(platform) {
   });
   const ex = platform.service('excel');
   const exData = addBatches(ex, EXCEL);
+  ex.recordAllConsents({ recordedBy: 'Admission desk' });
   generateHistory(ex, { days: 21, rates: exData.rates, seed: 11, holidays: [[-12, 'Guru Nanak Jayanti']] });
 
   platform.createInstitute({
@@ -193,6 +200,7 @@ export function seedDemo(platform) {
   });
   const tp = platform.service('toppers');
   const tpData = addBatches(tp, TOPPERS);
+  tp.recordAllConsents({ recordedBy: 'Admission desk' });
   generateHistory(tp, { days: 10, rates: tpData.rates, seed: 3 });
   platform.updateInstitute('toppers', { status: 'paused' });
   return true;

@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { promisify } from 'node:util';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -35,6 +36,25 @@ CREATE TABLE IF NOT EXISTS institutes (
   created_at  TEXT NOT NULL
 );
 
+-- Failed logins, kept in the database so limits survive restarts and apply across instances.
+CREATE TABLE IF NOT EXISTS login_failures (
+  id    INTEGER PRIMARY KEY,
+  phone TEXT NOT NULL,
+  ip    TEXT NOT NULL,
+  at    INTEGER NOT NULL                        -- epoch ms
+);
+CREATE INDEX IF NOT EXISTS idx_login_failures_phone ON login_failures(phone, at);
+CREATE INDEX IF NOT EXISTS idx_login_failures_ip ON login_failures(ip, at);
+
+-- One row per signed-in device; logging out revokes just that row.
+CREATE TABLE IF NOT EXISTS sessions (
+  id              TEXT PRIMARY KEY,
+  user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at      TEXT NOT NULL,
+  must_change_pin INTEGER NOT NULL DEFAULT 0,  -- signed in with a PIN that no longer meets the rules
+  revoked_at      TEXT
+);
+
 CREATE TABLE IF NOT EXISTS memberships (
   user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   institute_id INTEGER NOT NULL REFERENCES institutes(id) ON DELETE CASCADE,
@@ -46,10 +66,13 @@ CREATE TABLE IF NOT EXISTS memberships (
 
 export const ROLES = ['owner', 'staff', 'teacher'];
 const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{1,38}[a-z0-9])$/;
-const PIN_RE = /^\d{4,8}$/;
-const LOGIN_MAX_FAILS = 5;
-const LOGIN_LOCK_MS = 5 * 60_000;
 const TOKEN_TTL_MS = 30 * 24 * 60 * 60_000;
+// Login limits over a 15-minute window. A phone + device pair locks after 5 wrong PINs; a phone
+// across all devices after 20 (slows guessing from many addresses without letting one person lock
+// someone else out quickly); one address after 30 (stops spraying PINs across many phones).
+const LOGIN_WINDOW_MS = 15 * 60_000;
+const LIMITS = { pair: 5, phone: 20, ip: 30 };
+const scryptAsync = promisify(crypto.scrypt);
 
 export function slugify(name) {
   return String(name ?? '')
@@ -61,21 +84,38 @@ export function slugify(name) {
     .replace(/-+$/, '');
 }
 
-function hashPin(pin) {
+export function hashPin(pin) {
   const salt = crypto.randomBytes(16);
   const hash = crypto.scryptSync(String(pin), salt, 32);
   return `scrypt$${salt.toString('hex')}$${hash.toString('hex')}`;
 }
 
-function checkPin(pin, stored) {
+/** Checks a PIN without blocking the server (scrypt runs on the thread pool). */
+async function checkPin(pin, stored) {
   const [, saltHex, hashHex] = String(stored).split('$');
   if (!saltHex || !hashHex) return false;
-  const hash = crypto.scryptSync(String(pin), Buffer.from(saltHex, 'hex'), 32);
+  const hash = await scryptAsync(String(pin), Buffer.from(saltHex, 'hex'), 32);
   return crypto.timingSafeEqual(hash, Buffer.from(hashHex, 'hex'));
 }
 
-function requirePin(pin) {
-  if (!PIN_RE.test(String(pin ?? ''))) throw new HttpError(400, 'PIN must be 4 to 8 digits');
+// Compared against for unknown numbers, so a wrong number takes as long as a wrong PIN.
+const DUMMY_HASH = hashPin(crypto.randomBytes(8).toString('hex'));
+
+/** Why a PIN is too weak to set, or null if it's fine. */
+export function pinProblem(pin, phone = '') {
+  const p = String(pin ?? '');
+  if (!/^\d{6,8}$/.test(p)) return 'PIN must be 6 to 8 digits';
+  if (/^(\d)\1+$/.test(p)) return "Choose a PIN that isn't one digit repeated";
+  if ('01234567890'.includes(p) || '09876543210'.includes(p)) return "Choose a PIN that isn't a simple sequence";
+  if (/^(\d\d)\1+$/.test(p) || /^(\d{3})\1$/.test(p) || /^(\d)\1(\d)\2(\d)\3$/.test(p)) return 'Choose a less predictable PIN';
+  const digits = normalizePhone(phone);
+  if (digits.length >= 10 && digits.slice(-10).includes(p)) return "Don't use part of your mobile number";
+  return null;
+}
+
+function requirePin(pin, phone) {
+  const why = pinProblem(pin, phone);
+  if (why) throw new HttpError(400, why);
   return String(pin);
 }
 
@@ -104,7 +144,6 @@ export class Platform {
     this.onChange = onChange;
     this.logger = logger;
     this.services = new Map();
-    this.loginFails = new Map();
     if (dataDir) fs.mkdirSync(path.join(dataDir, 'institutes'), { recursive: true });
     this.db = new DatabaseSync(dataDir ? path.join(dataDir, 'platform.db') : ':memory:');
     if (dataDir) this.db.exec('PRAGMA journal_mode = WAL;');
@@ -156,56 +195,91 @@ export class Platform {
     if (this.db.prepare('SELECT 1 FROM users WHERE phone = ?').get(p)) throw new HttpError(409, 'Someone with this number already has an account');
     const r = this.db
       .prepare('INSERT INTO users (name, phone, pin_hash, is_agency, created_at) VALUES (?, ?, ?, ?, ?)')
-      .run(requireName(name), p, hashPin(requirePin(pin)), isAgency ? 1 : 0, this.nowIso());
+      .run(requireName(name), p, hashPin(requirePin(pin, p)), isAgency ? 1 : 0, this.nowIso());
     return this.getUser(Number(r.lastInsertRowid));
   }
 
+  /** Sets a new PIN and signs the user out on every device (the caller issues a fresh session). */
   setPin(userId, pin) {
-    this.db.prepare('UPDATE users SET pin_hash = ?, token_version = token_version + 1 WHERE id = ?').run(hashPin(requirePin(pin)), userId);
+    const u = this.getUser(userId);
+    this.db.prepare('UPDATE users SET pin_hash = ?, token_version = token_version + 1 WHERE id = ?').run(hashPin(requirePin(pin, u?.phone)), userId);
+    this.signOutEverywhere(userId);
   }
 
-  authenticate(phoneRaw, pin) {
-    const phone = normalizePhone(phoneRaw);
-    const key = phone || 'unknown';
-    const f = this.loginFails.get(key);
+  /**
+   * Checks a phone + PIN. Limits are counted in the database per phone + address, per phone and
+   * per address (see LIMITS). Returns the user, plus whether their PIN no longer meets the rules.
+   */
+  async authenticate(phoneRaw, pin, { ip = 'unknown' } = {}) {
+    const phone = normalizePhone(phoneRaw) || 'unknown';
     const now = this.clock();
-    if (f && f.until > now) {
-      throw new HttpError(429, `Too many wrong PINs. Try again in ${Math.ceil((f.until - now) / 60000)} min.`);
+    const since = now - LOGIN_WINDOW_MS;
+    const count = (where, ...args) => this.db.prepare(`SELECT COUNT(*) AS n, MIN(at) AS first FROM login_failures WHERE at > ? AND ${where}`).get(since, ...args);
+    const checks = [
+      [count('phone = ? AND ip = ?', phone, ip), LIMITS.pair],
+      [count('phone = ?', phone), LIMITS.phone],
+      [count('ip = ?', ip), LIMITS.ip],
+    ];
+    const hit = checks.find(([c, limit]) => c.n >= limit);
+    if (hit) {
+      const wait = Math.max(1, Math.ceil((hit[0].first + LOGIN_WINDOW_MS - now) / 60000));
+      throw new HttpError(429, `Too many wrong PINs. Try again in ${wait} min.`);
     }
+
     const u = this.db.prepare('SELECT * FROM users WHERE phone = ? AND active = 1').get(phone);
-    if (!u || !checkPin(pin, u.pin_hash)) {
-      const fails = (f && f.until <= now && f.until ? 0 : f?.fails ?? 0) + 1;
-      this.loginFails.set(key, { fails, until: fails >= LOGIN_MAX_FAILS ? now + LOGIN_LOCK_MS : 0 });
+    const ok = await checkPin(pin, u ? u.pin_hash : DUMMY_HASH);
+    if (!u || !ok) {
+      this.db.prepare('INSERT INTO login_failures (phone, ip, at) VALUES (?, ?, ?)').run(phone, ip, now);
+      this.db.prepare('DELETE FROM login_failures WHERE at < ?').run(now - 4 * LOGIN_WINDOW_MS);
       throw new HttpError(401, 'Wrong mobile number or PIN');
     }
-    this.loginFails.delete(key);
+    this.db.prepare('DELETE FROM login_failures WHERE phone = ? AND ip = ?').run(phone, ip);
     this.db.prepare('UPDATE users SET last_login_at = ? WHERE id = ?').run(this.nowIso(), u.id);
-    return u;
+    return { user: u, weakPin: Boolean(pinProblem(pin, phone)) };
   }
 
-  issueToken(user) {
-    const body = Buffer.from(JSON.stringify({ uid: user.id, tv: user.token_version, exp: this.clock() + TOKEN_TTL_MS })).toString('base64url');
+  /** A signed, revocable session token for this device. */
+  issueToken(user, { mustChangePin = false } = {}) {
+    const sid = crypto.randomBytes(18).toString('base64url');
+    this.db
+      .prepare('INSERT INTO sessions (id, user_id, created_at, must_change_pin) VALUES (?, ?, ?, ?)')
+      .run(sid, user.id, this.nowIso(), mustChangePin ? 1 : 0);
+    const body = Buffer.from(JSON.stringify({ uid: user.id, sid, exp: this.clock() + TOKEN_TTL_MS })).toString('base64url');
     const sig = crypto.createHmac('sha256', this.secret()).update(body).digest('base64url');
     return `${body}.${sig}`;
   }
 
-  userFromToken(token) {
+  readToken(token) {
     if (!token || !token.includes('.')) return null;
     const [body, sig] = token.split('.');
     const expected = crypto.createHmac('sha256', this.secret()).update(body).digest('base64url');
-    if (sig.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
+    if (!sig || sig.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
     try {
-      const { uid, tv, exp } = JSON.parse(Buffer.from(body, 'base64url').toString());
-      if (exp < this.clock()) return null;
-      const u = this.getUser(uid);
-      return u && u.token_version === tv ? u : null;
+      const claims = JSON.parse(Buffer.from(body, 'base64url').toString());
+      return claims.exp >= this.clock() && claims.sid ? claims : null;
     } catch {
       return null;
     }
   }
 
+  /** The signed-in user for a token, or null if it's invalid, expired, logged out or revoked. */
+  userFromToken(token) {
+    const claims = this.readToken(token);
+    if (!claims) return null;
+    const session = this.db.prepare('SELECT * FROM sessions WHERE id = ? AND user_id = ? AND revoked_at IS NULL').get(claims.sid, claims.uid);
+    if (!session) return null;
+    const u = this.getUser(claims.uid);
+    return u ? { ...u, sessionId: session.id, mustChangePin: Boolean(session.must_change_pin) } : null;
+  }
+
+  /** Log out one device. */
+  revokeToken(token) {
+    const claims = this.readToken(token);
+    if (claims) this.db.prepare('UPDATE sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL').run(this.nowIso(), claims.sid);
+  }
+
   signOutEverywhere(userId) {
-    this.db.prepare('UPDATE users SET token_version = token_version + 1 WHERE id = ?').run(userId);
+    this.db.prepare('UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL').run(this.nowIso(), userId);
   }
 
   // ------------------------------------------------------------ institutes

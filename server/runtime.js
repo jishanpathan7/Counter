@@ -7,6 +7,15 @@ import { createApp, createEventHub } from './app.js';
 import { seedDemo } from './seed.js';
 import { isValidTimeZone } from './time.js';
 
+/** TRUST_PROXY: a hop count ("1"), true/false, or addresses/subnets ("loopback, 10.0.0.0/8"). */
+export function parseTrustProxy(v) {
+  const s = String(v ?? '').trim();
+  if (!s) return 'loopback';
+  if (/^\d+$/.test(s)) return Number(s);
+  if (s === 'true' || s === 'false') return s === 'true';
+  return s;
+}
+
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 /**
@@ -84,6 +93,7 @@ export function createRuntime({ env = process.env, serverless = false, dev = fal
     realtime: !serverless,
     ephemeral: serverless,
     tickOnRequest,
+    trustProxy: serverless ? true : parseTrustProxy(env.TRUST_PROXY),
     staticDir: serverless ? null : path.join(ROOT, 'dist'),
     logger,
   });

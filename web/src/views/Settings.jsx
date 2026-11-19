@@ -57,6 +57,12 @@ function General() {
           </label>
         </div>
         <div className="divider" />
+        <h3>Parent consent</h3>
+        <label className="check"><input type="checkbox" checked={f.requireConsent} onChange={set('requireConsent')} /> Only send WhatsApp alerts to parents who agreed</label>
+        <p className="muted small" style={{ marginTop: -8 }}>
+          Recommended. Parents agree by signing the admission form (record it under Students) or by sending START on WhatsApp. Without consent the absence becomes a call task instead. Parents who send STOP are never messaged, whatever this setting says.
+        </p>
+        <div className="divider" />
         <h3>Daily summary for the owner</h3>
         <p className="muted small" style={{ marginTop: -8 }}>An end-of-day WhatsApp with the day's attendance, alerts, calls and students who need attention.</p>
         <label className="check"><input type="checkbox" checked={f.digestEnabled} onChange={set('digestEnabled')} /> Send me a daily summary</label>
@@ -232,7 +238,7 @@ function MemberForm({ initial, batches, onSave, onCancel, isNew }) {
       ) : (
         <label className="field">
           {isNew ? 'PIN for their first login' : 'Reset PIN'}
-          <input className="input" inputMode="numeric" maxLength={8} value={f.pin} onChange={(e) => setF({ ...f, pin: e.target.value.replace(/\D/g, '') })} required={isNew} placeholder={isNew ? '4–8 digits' : 'Leave blank to keep'} />
+          <input className="input" inputMode="numeric" maxLength={8} value={f.pin} onChange={(e) => setF({ ...f, pin: e.target.value.replace(/\D/g, '') })} required={isNew} placeholder={isNew ? '6–8 digits' : 'Leave blank to keep'} />
           {isNew && <span className="hint">If they already have an account with another institute, they keep their own name and PIN.</span>}
         </label>
       )}
@@ -399,6 +405,7 @@ function WhatsAppSettings() {
           </div>
           <div className="grid2">
             <label className="field">Phone number ID<input className="input" value={f.phoneNumberId} onChange={(e) => setF({ ...f, phoneNumberId: e.target.value })} placeholder="from WhatsApp → API setup" /></label>
+            <label className="field">WhatsApp number parents see<input className="input" inputMode="tel" value={f.displayPhone ?? ''} onChange={(e) => setF({ ...f, displayPhone: e.target.value })} placeholder="91 98765 43210" /><span className="hint">Used for the "send START" opt-in link and QR code.</span></label>
             <label className="field">
               Access token
               <input className="input" type="password" value={f.token} onChange={(e) => setF({ ...f, token: e.target.value })} placeholder={data.token ? '•••••• saved (type to replace)' : 'Permanent access token'} autoComplete="off" />
@@ -443,6 +450,7 @@ function Account() {
   const submit = async (e) => {
     e.preventDefault();
     setError('');
+    if (f.next.length < 6) return setError('PIN must be 6 to 8 digits');
     if (f.next !== f.again) return setError("New PINs don't match");
     const r = await save(() => rootApi.post('/auth/pin', { current: f.current, next: f.next }), 'PIN changed');
     if (r) setF({ current: '', next: '', again: '' });
@@ -457,6 +465,7 @@ function Account() {
         <label className="field">New PIN<input {...pin('next')} /></label>
         <label className="field">Repeat new PIN<input {...pin('again')} /></label>
       </div>
+      <p className="hint">Use 6 to 8 digits. Avoid 123456, repeated digits or part of your mobile number. Changing it signs you out on your other devices.</p>
       {error && <p className="error-text small">{error}</p>}
       <div><button className="btn primary">Change PIN</button></div>
     </form>

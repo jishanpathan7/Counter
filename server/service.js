@@ -18,10 +18,19 @@ const DEFAULT_SETTINGS = {
   digestEnabled: '0', // end-of-day WhatsApp summary to the owner
   digestTime: '20:00',
   ownerPhone: '',
+  requireConsent: '1', // only message parents who agreed; others become a call task
 };
 
+export const CONSENT_WORDING = {
+  whatsapp: 'Parent sent START to receive attendance alerts on WhatsApp',
+  staff: 'Consent recorded on the admission form',
+};
+const OPT_OUT_RE = /^\s*(stop|unsubscribe|band karo|band kar do|band|रोको|बंद करो|बंद)(?=\s|$|[.!])/i;
+const OPT_IN_RE = /^\s*(start|subscribe|shuru|शुरू)(?=\s|$|[.!])/i;
+const YES_RE = /^\s*(haan|han|ha|yes|ok|हाँ|हां)[.! ]*$/i;
+
 /** WhatsApp Cloud API settings, kept per institute. Secrets never leave the server. */
-const WA_KEYS = ['token', 'phoneNumberId', 'template', 'digestTemplate', 'templateLang', 'verifyToken', 'appSecret'];
+const WA_KEYS = ['token', 'phoneNumberId', 'displayPhone', 'template', 'digestTemplate', 'templateLang', 'verifyToken', 'appSecret'];
 const WA_SECRET = new Set(['token', 'appSecret']);
 
 /** Fill {placeholders} in a message template. */
@@ -179,6 +188,7 @@ export class AttendanceService {
       digestEnabled: s.digestEnabled === '1',
       digestTime: s.digestTime,
       ownerPhone: s.ownerPhone,
+      requireConsent: s.requireConsent !== '0',
     };
   }
 
@@ -191,6 +201,7 @@ export class AttendanceService {
       upsert.run('alertTemplate', t);
     }
     if (patch.digestEnabled !== undefined) upsert.run('digestEnabled', patch.digestEnabled ? '1' : '0');
+    if (patch.requireConsent !== undefined) upsert.run('requireConsent', patch.requireConsent ? '1' : '0');
     if (patch.digestTime !== undefined) {
       if (!TIME_RE.test(String(patch.digestTime))) throw new HttpError(400, 'Summary time must be HH:MM');
       upsert.run('digestTime', patch.digestTime);
@@ -451,6 +462,20 @@ export class AttendanceService {
     if (!r.changes) return; // one alert per student per session
     const alertId = Number(r.lastInsertRowid);
 
+    // No WhatsApp without consent: the absence still reaches the parent, by a phone call.
+    const consent = this.consentFor(student.parent_phone);
+    const blocked =
+      consent?.status === 'opted_out'
+        ? 'Parent replied STOP to WhatsApp alerts'
+        : this.rawSettings().requireConsent !== '0' && consent?.status !== 'opted_in'
+          ? 'No WhatsApp consent recorded for this parent yet'
+          : null;
+    if (blocked) {
+      this.db.prepare("UPDATE alerts SET status = 'failed', error = ? WHERE id = ?").run(blocked, alertId);
+      this.createTask(alertId, `Call instead: ${blocked.charAt(0).toLowerCase()}${blocked.slice(1)}`);
+      return;
+    }
+
     const time = formatTime(this.tz, session.starts_at);
     const parentName = student.parent_name || 'Parent';
     const text = renderTemplate(this.rawSettings().alertTemplate, {
@@ -492,6 +517,9 @@ export class AttendanceService {
     const from = normalizePhone(phone);
     // Meta retries webhooks it thinks failed: the same message id means we've already handled it.
     if (id && this.db.prepare('SELECT 1 FROM messages WHERE wamid = ?').get(id)) return { matched: false, duplicate: true };
+
+    const consentReply = await this.handleConsentMessage({ from, text: String(text || ''), id });
+    if (consentReply) return consentReply;
     let alert = null;
     let choice = null;
 
@@ -570,6 +598,112 @@ export class AttendanceService {
 
     this.changed();
     return { matched: true, alertId: alert.id, choice };
+  }
+
+  // ---------------------------------------------------- consent (opt-in)
+
+  consentFor(phone) {
+    const c = this.db.prepare('SELECT status, source, wording, recorded_by AS recordedBy, updated_at AS updatedAt FROM consents WHERE phone = ?').get(normalizePhone(phone));
+    return c ?? null;
+  }
+
+  setConsent(phone, status, { source, recordedBy = null } = {}) {
+    const p = normalizePhone(phone);
+    const at = this.nowIso();
+    const wording = CONSENT_WORDING[source] ?? null;
+    this.db
+      .prepare(
+        `INSERT INTO consents (phone, status, source, wording, recorded_by, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(phone) DO UPDATE SET status = excluded.status, source = excluded.source, wording = excluded.wording,
+           recorded_by = excluded.recorded_by, updated_at = excluded.updated_at`,
+      )
+      .run(p, status, source, wording, recordedBy, at);
+    this.db
+      .prepare('INSERT INTO consent_log (phone, status, source, wording, recorded_by, at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(p, status, source, wording, recordedBy, at);
+    this.changed();
+  }
+
+  /** The office records consent from the signed admission form. A parent's STOP can't be overridden. */
+  recordConsent(studentId, { recordedBy = null } = {}) {
+    const st = this.db.prepare('SELECT * FROM students WHERE id = ? AND active = 1').get(studentId);
+    if (!st) throw new HttpError(404, 'Student not found');
+    if (this.consentFor(st.parent_phone)?.status === 'opted_out') {
+      throw new HttpError(409, 'This parent sent STOP. Only they can turn alerts back on, by sending START.');
+    }
+    this.setConsent(st.parent_phone, 'opted_in', { source: 'staff', recordedBy });
+    return this.consentFor(st.parent_phone);
+  }
+
+  /** Remove a consent the office recorded by mistake (back to "not yet"). */
+  clearConsent(studentId, { recordedBy = null } = {}) {
+    const st = this.db.prepare('SELECT * FROM students WHERE id = ? AND active = 1').get(studentId);
+    if (!st) throw new HttpError(404, 'Student not found');
+    const c = this.consentFor(st.parent_phone);
+    if (!c) return null;
+    if (c.source !== 'staff') throw new HttpError(409, 'This consent came from the parent on WhatsApp; only they can change it.');
+    this.db.prepare('DELETE FROM consents WHERE phone = ?').run(st.parent_phone);
+    this.db
+      .prepare("INSERT INTO consent_log (phone, status, source, wording, recorded_by, at) VALUES (?, 'cleared', 'staff', NULL, ?, ?)")
+      .run(st.parent_phone, recordedBy, this.nowIso());
+    this.changed();
+    return null;
+  }
+
+  /** Record admission-form consent for every parent who has no record yet (optionally one batch). */
+  recordAllConsents({ batchId = null, recordedBy = null } = {}) {
+    const phones = this.db
+      .prepare(
+        `SELECT DISTINCT st.parent_phone AS phone FROM students st
+          WHERE st.active = 1 AND (? IS NULL OR st.batch_id = ?)
+            AND NOT EXISTS (SELECT 1 FROM consents c WHERE c.phone = st.parent_phone)`,
+      )
+      .all(batchId, batchId);
+    for (const { phone } of phones) this.setConsent(phone, 'opted_in', { source: 'staff', recordedBy });
+    return { recorded: phones.length };
+  }
+
+  /** START / STOP (and a plain "haan" from a parent who hasn't opted in yet). Returns null if it's neither. */
+  async handleConsentMessage({ from, text, id }) {
+    const current = this.consentFor(from);
+    const optOut = OPT_OUT_RE.test(text);
+    const optIn = !optOut && (OPT_IN_RE.test(text) || (!current && YES_RE.test(text)));
+    if (!optOut && !optIn) return null;
+
+    const children = this.db
+      .prepare('SELECT name FROM students WHERE parent_phone = ? AND active = 1 ORDER BY name')
+      .all(from)
+      .map((r) => r.name.split(' ')[0]);
+    const institute = this.rawSettings().instituteName;
+    try {
+      this.logMessage({ phone: from, direction: 'in', body: text.slice(0, 1000), wamid: id });
+    } catch (err) {
+      if (/UNIQUE/i.test(err.message)) return { matched: false, duplicate: true };
+      throw err;
+    }
+
+    let ack;
+    let consent = null;
+    if (optOut) {
+      this.setConsent(from, 'opted_out', { source: 'whatsapp' });
+      consent = 'opted_out';
+      ack = `Theek hai, ab ${institute} se WhatsApp attendance alerts nahi aayenge. Dobara shuru karne ke liye START likhein.`;
+    } else if (!children.length) {
+      ack = `Yeh number ${institute} ke records mein nahi mila. Kripya office se sampark karein.`;
+    } else {
+      this.setConsent(from, 'opted_in', { source: 'whatsapp' });
+      consent = 'opted_in';
+      ack = `Dhanyavaad! Aapko ${institute} se ${children.join(', ')} ke attendance alerts WhatsApp par milenge. Band karne ke liye STOP likhein.`;
+    }
+    const ackMsg = this.logMessage({ phone: from, direction: 'out', body: ack });
+    try {
+      const { id: ackId } = await this.messenger.send({ to: from, text: ack });
+      this.markSent(ackMsg, ackId);
+    } catch (err) {
+      this.db.prepare("UPDATE messages SET error = ?, status = 'failed' WHERE id = ?").run(err.message, ackMsg);
+    }
+    this.changed();
+    return { matched: false, consent };
   }
 
   // ---------------------------------------------- Step 6: staff call tasks
@@ -913,6 +1047,7 @@ export class AttendanceService {
       .prepare(
         `SELECT st.id, st.name, st.batch_id AS batchId, b.name AS batchName,
                 st.parent_name AS parentName, st.parent_phone AS parentPhone,
+                c.status AS consentStatus, c.source AS consentSource,
                 COALESCE(SUM(x.status = 'P'), 0) AS P,
                 COALESCE(SUM(x.status = 'A'), 0) AS A,
                 COALESCE(SUM(x.status = 'L'), 0) AS L,
@@ -922,6 +1057,7 @@ export class AttendanceService {
                 COALESCE(SUM(x.status = 'A' AND x.date >= ?), 0) AS recentAbsences
            FROM students st
            JOIN batches b ON b.id = st.batch_id
+           LEFT JOIN consents c ON c.phone = st.parent_phone
            LEFT JOIN (SELECT a.student_id, a.status, a.note, se.date
                         FROM attendance a JOIN sessions se ON se.id = a.session_id
                        WHERE se.date BETWEEN ? AND ?) x ON x.student_id = st.id
@@ -977,7 +1113,7 @@ export class AttendanceService {
 
     const alerts = this.db
       .prepare(
-        `SELECT al.id, al.status, al.sent_at AS sentAt, al.reply, al.replied_at AS repliedAt, al.escalated_at AS escalatedAt,
+        `SELECT al.id, al.status, al.error, al.sent_at AS sentAt, al.reply, al.replied_at AS repliedAt, al.escalated_at AS escalatedAt,
                 se.date, b.name AS batchName, t.outcome, t.status AS taskStatus
            FROM alerts al JOIN sessions se ON se.id = al.session_id JOIN batches b ON b.id = se.batch_id
            LEFT JOIN tasks t ON t.alert_id = al.id
@@ -997,6 +1133,10 @@ export class AttendanceService {
       name: st.name,
       parentName: st.parent_name,
       parentPhone: st.parent_phone,
+      consent: this.consentFor(st.parent_phone),
+      consentLog: this.db
+        .prepare('SELECT status, source, wording, recorded_by AS recordedBy, at FROM consent_log WHERE phone = ? ORDER BY id DESC LIMIT 10')
+        .all(st.parent_phone),
       batch: { id: st.batch_id, name: st.batch_name, startTime: st.start_time },
       today,
       from,

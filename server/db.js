@@ -87,6 +87,27 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at TEXT NOT NULL
 );
 
+-- WhatsApp consent per parent number (one record covers siblings on the same number).
+CREATE TABLE IF NOT EXISTS consents (
+  phone       TEXT PRIMARY KEY,
+  status      TEXT NOT NULL CHECK (status IN ('opted_in', 'opted_out')),
+  source      TEXT NOT NULL,                     -- whatsapp (parent sent START/STOP) | staff (admission form)
+  wording     TEXT,                              -- what the parent agreed to, for the record
+  recorded_by TEXT,
+  updated_at  TEXT NOT NULL
+);
+
+-- Every consent change, kept as evidence (WhatsApp opt-in rules, DPDP).
+CREATE TABLE IF NOT EXISTS consent_log (
+  id          INTEGER PRIMARY KEY,
+  phone       TEXT NOT NULL,
+  status      TEXT NOT NULL,
+  source      TEXT NOT NULL,
+  wording     TEXT,
+  recorded_by TEXT,
+  at          TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS holidays (
   date  TEXT PRIMARY KEY,                         -- 'YYYY-MM-DD'
   label TEXT NOT NULL

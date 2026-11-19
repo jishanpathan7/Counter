@@ -48,9 +48,11 @@ function csvCell(v) {
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-export function createApp({ platform, hub, demo = false, setupToken = null, realtime = true, ephemeral = false, tickOnRequest = null, staticDir = null, logger = console }) {
+export function createApp({ platform, hub, demo = false, setupToken = null, realtime = true, ephemeral = false, tickOnRequest = null, trustProxy = 'loopback', staticDir = null, logger = console }) {
   const app = express();
   app.disable('x-powered-by');
+  // Behind a reverse proxy (Caddy on the same machine, or Vercel), take the visitor's real address for login limits.
+  app.set('trust proxy', trustProxy);
   app.use(express.json({ limit: '1mb', verify: (req, _res, buf) => (req.rawBody = buf) }));
   app.use((_req, res, next) => {
     res.set({ 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'same-origin', 'X-Frame-Options': 'DENY' });
@@ -105,11 +107,13 @@ export function createApp({ platform, hub, demo = false, setupToken = null, real
   app.post('/webhooks/whatsapp/:slug', receiveWebhook);
 
   // ------------------------------------------------------------------ auth
-  const userOf = (req) => platform.userFromToken(parseCookies(req.headers.cookie)[COOKIE]);
-  const setSession = (req, res, user) => {
+  const tokenOf = (req) => parseCookies(req.headers.cookie)[COOKIE];
+  const userOf = (req) => platform.userFromToken(tokenOf(req));
+  const setSession = (req, res, user, opts = {}) => {
     const secure = req.secure || req.get('x-forwarded-proto') === 'https' ? '; Secure' : '';
-    res.setHeader('Set-Cookie', `${COOKIE}=${platform.issueToken(user)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${60 * 60 * 24 * 30}${secure}`);
+    res.setHeader('Set-Cookie', `${COOKIE}=${platform.issueToken(user, opts)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${60 * 60 * 24 * 30}${secure}`);
   };
+  const meUser = (u) => (u ? { ...platform.publicUser(u), mustChangePin: Boolean(u.mustChangePin) } : null);
 
   app.get('/api/health', (_req, res) => res.json({ ok: true }));
 
@@ -118,19 +122,22 @@ export function createApp({ platform, hub, demo = false, setupToken = null, real
     res.json({
       needsSetup: platform.needsSetup(),
       setupCodeRequired: Boolean(setupToken) && platform.needsSetup(),
-      user: platform.publicUser(u),
+      user: meUser(u),
       memberships: u ? platform.membershipsFor(u) : [],
       demo: demo ? { pin: DEMO_PIN, logins: DEMO_LOGINS, ephemeral } : null,
     });
   });
 
-  app.post('/api/auth/login', (req, res) => {
-    const u = platform.authenticate(req.body?.phone, String(req.body?.pin ?? ''));
-    setSession(req, res, u);
-    res.json({ user: platform.publicUser(u), memberships: platform.membershipsFor(u) });
+  app.post('/api/auth/login', async (req, res) => {
+    const { user, weakPin } = await platform.authenticate(req.body?.phone, String(req.body?.pin ?? ''), { ip: req.ip });
+    // Older 4-digit or guessable PINs still work once, but must be replaced before anything else.
+    const mustChangePin = weakPin;
+    setSession(req, res, user, { mustChangePin });
+    res.json({ user: { ...platform.publicUser(user), mustChangePin }, memberships: platform.membershipsFor(user) });
   });
 
-  app.post('/api/auth/logout', (_req, res) => {
+  app.post('/api/auth/logout', (req, res) => {
+    platform.revokeToken(tokenOf(req)); // the stolen-cookie case: logging out really ends the session
     res.setHeader('Set-Cookie', `${COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`);
     res.json({ ok: true });
   });
@@ -151,12 +158,13 @@ export function createApp({ platform, hub, demo = false, setupToken = null, real
   app.use('/api', (req, _res, next) => {
     req.user = userOf(req);
     if (!req.user) throw new HttpError(401, 'Please log in');
+    if (req.user.mustChangePin && req.path !== '/auth/pin') throw new HttpError(403, 'Please set a new PIN first');
     next();
   });
 
-  app.post('/api/auth/pin', (req, res) => {
-    platform.authenticate(req.user.phone, String(req.body?.current ?? ''));
-    platform.setPin(req.user.id, req.body?.next);
+  app.post('/api/auth/pin', async (req, res) => {
+    await platform.authenticate(req.user.phone, String(req.body?.current ?? ''), { ip: req.ip });
+    platform.setPin(req.user.id, req.body?.next); // signs out every device
     setSession(req, res, platform.getUser(req.user.id));
     res.json({ ok: true });
   });
@@ -219,6 +227,9 @@ export function createApp({ platform, hub, demo = false, setupToken = null, real
       realtime,
       tz: req.svc.tz,
       today: req.svc.today(),
+      // Parents opt in by messaging START to this number (wa.me link / QR on the admission form).
+      optInPhone: String(req.svc.getWhatsAppConfig().displayPhone || '').replace(/\D/g, '') || null,
+      requireConsent: req.svc.getSettings().requireConsent,
     });
   });
 
@@ -283,6 +294,12 @@ export function createApp({ platform, hub, demo = false, setupToken = null, real
   inst.get('/students/:id', MGMT, (req, res) => res.json(req.svc.getStudentProfile(Number(req.params.id))));
   inst.post('/students', MGMT, (req, res) => res.status(201).json(req.svc.createStudent(req.body ?? {})));
   inst.post('/students/import', OWNER, (req, res) => res.json(req.svc.importStudents(req.body ?? {})));
+  inst.post('/students/:id/consent', MGMT, (req, res) => {
+    const by = req.user.name;
+    const r = req.body?.action === 'clear' ? req.svc.clearConsent(Number(req.params.id), { recordedBy: by }) : req.svc.recordConsent(Number(req.params.id), { recordedBy: by });
+    res.json({ consent: r });
+  });
+  inst.post('/consents/record-all', OWNER, (req, res) => res.json(req.svc.recordAllConsents({ batchId: req.body?.batchId ? Number(req.body.batchId) : null, recordedBy: req.user.name })));
   inst.patch('/students/:id', MGMT, (req, res) => res.json(req.svc.updateStudent(Number(req.params.id), req.body ?? {})));
   inst.delete('/students/:id', OWNER, (req, res) => {
     req.svc.deleteStudent(Number(req.params.id));

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, AppContext, instApi, navigate, setDefaultTz, useLocation } from './api.js';
 import { Avatar, BrandMark, Icon, useTheme } from './ui.jsx';
-import { Login, SetupWizard } from './views/Auth.jsx';
+import { Login, NewPin, SetupWizard } from './views/Auth.jsx';
 import Agency from './views/Agency.jsx';
 import Dashboard from './views/Dashboard.jsx';
 import Teacher from './views/Teacher.jsx';
@@ -202,6 +202,7 @@ export default function App() {
   const { path } = useLocation();
   const [me, setMe] = useState(null);
   const [failed, setFailed] = useState(false);
+  const [typedPin, setTypedPin] = useState(''); // kept in memory only, to prefill "current PIN" below
   const theme = useTheme();
   const [toast, showToast] = useToast();
 
@@ -226,7 +227,10 @@ export default function App() {
   if (failed) return <div className="center error-text">Can't reach the server. Is it running?</div>;
   if (!me) return <div className="center muted">Loading…</div>;
   if (me.needsSetup) return <SetupWizard onDone={refreshMe} setupCodeRequired={me.setupCodeRequired} />;
-  if (!me.user) return <Login demo={me.demo} onDone={refreshMe} />;
+  if (!me.user) return <Login demo={me.demo} onDone={(pin) => { setTypedPin(pin); return refreshMe(); }} />;
+  if (me.user.mustChangePin) {
+    return <NewPin me={me} currentPin={typedPin} logout={logout} onDone={() => { setTypedPin(''); return refreshMe(); }} />;
+  }
   if (instMatch) return <InstituteApp key={instMatch[1]} slug={instMatch[1]} me={me} logout={logout} theme={theme} />;
   if (me.user.isAgency) {
     return (

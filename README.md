@@ -27,14 +27,15 @@ parents who don't reply land on the front desk's call list.
 | **Agency console** | Every institute you run in one place: monthly revenue, students covered, alerts sent, 7-day attendance trend. Add an institute with its owner's login in one form; pause or resume an institute (no logins, no messages). |
 | **Dashboard** | Today's six steps as a live funnel, an impact card ("parents hear within 10 min, 1h 40m before class ends"), live class cards with a step-by-step timeline, an activity feed and students who need attention. Updates live. |
 | **Take attendance** | Big P / A / L buttons, progress bar and "mark all present". Teachers see only their own batches and never see parents' numbers. |
-| **Students** | Search, filter and sort by 30-day attendance. At-risk flags: under 75%, 3+ absences in 14 days, or repeated bunks. Profile with a 90-day calendar, streaks, every WhatsApp alert and reply, and one-tap call / WhatsApp. |
+| **Students** | Search, filter and sort by 30-day attendance. WhatsApp consent per parent ("Agreed", "Not asked", "Said STOP"), a "No WhatsApp consent" filter, one button to record signed admission forms, and a copyable `wa.me/…?text=START` opt-in link. At-risk flags: under 75%, 3+ absences in 14 days, or repeated bunks. Profile with a 90-day calendar, streaks, every WhatsApp alert and reply, and one-tap call / WhatsApp. |
 | **CSV import** | Paste from Excel or upload a CSV. A preview flags bad phone numbers and unknown batches before anything is saved. |
 | **Call tasks** | Tap to call, add a note, log the outcome; the register updates itself. |
 | **WhatsApp** | Every message in and out. Until a WhatsApp account is connected, a phone-style simulator lets you reply as the parent. |
 | **Reports** | 7 / 30 / 90 days, this month or a custom range, by batch. Daily chart, batch and student tables, reply rate, average reply time, bunks caught. CSV export. |
 | **Settings** | Class timers, batches (time, length, days), holidays (no classes, no alerts), team and roles, the alert message editor with live preview (Hinglish, English, हिंदी), WhatsApp Cloud API connection, owner's daily summary, PIN change. |
 
-Also included: phone + PIN login with lockout after repeated wrong PINs, four roles (agency admin,
+Also included: phone + PIN login (6–8 digit PINs that aren't a sequence, a repeat or part of the
+mobile number; older or easy PINs must be replaced at the next login), four roles (agency admin,
 owner, front desk, teacher), a first-run setup wizard, dark mode, and installability as a phone app
 (PWA).
 
@@ -46,6 +47,34 @@ owner, front desk, teacher), a first-run setup wizard, dark mode, and installabi
 | Settings, team, WhatsApp, import | ✓ | ✓ | | |
 | Dashboard, students, calls, WhatsApp, reports | ✓ | ✓ | ✓ | |
 | Take attendance | ✓ | ✓ | ✓ | own batches |
+
+### Parent consent
+
+WhatsApp only allows business messages to people who agreed to get them, and India's DPDP Act asks
+for the same. So by default (Settings → General → *Parent consent*):
+
+- An absence alert goes on WhatsApp only if the parent has agreed. Otherwise the absence becomes a
+  call task ("Call instead: no WhatsApp consent"), so the parent still hears about it.
+- Parents agree by **sending START** to the institute's WhatsApp number (the opt-in link or a QR code
+  on the admission form), or the office **records the signed admission form** (one student, or
+  everyone without a record). A plain "haan" / "yes" also counts from a parent with no record yet.
+- **STOP** (also "band karo", "बंद") turns alerts off for good: they're never messaged again, even if
+  the consent rule is switched off, and staff can't override it. Only the parent can undo it with
+  START. Both are acknowledged on WhatsApp in Hinglish.
+- Every change is kept in a consent log (who, how, when and the wording agreed to), shown on the
+  student's profile. Numbers that aren't in the student list can't opt themselves in.
+
+### Login security
+
+- PINs are 6–8 digits and can't be `123456`, one digit repeated, a simple pattern or part of the
+  mobile number. Anyone still on an old 4-digit or guessable PIN can log in once but must choose a new
+  PIN before they can see anything.
+- Wrong PINs are counted in the database, so limits survive restarts and serverless cold starts:
+  5 tries per phone from one device, 20 per phone from anywhere, 30 from one network, each per
+  15 minutes. One person guessing can't lock the real user out of their own device.
+- Every login is a server-side session. Logging out ends it for good (a copied cookie stops working),
+  and changing or resetting a PIN signs that person out on every other device.
+- Behind a proxy or load balancer set `TRUST_PROXY` so limits use the visitor's real address.
 
 ### Safeguards
 
@@ -81,7 +110,7 @@ npm run dev          # API on :3001, app on http://localhost:5173
 ```
 
 The first start creates a **demo workspace**: an agency running three institutes, with a month of
-attendance history. The login screen has one-tap buttons for each role (PIN `1234`):
+attendance history. The login screen has one-tap buttons for each role (PIN `482915`):
 
 | Role | Mobile |
 | --- | --- |

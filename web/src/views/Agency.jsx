@@ -53,7 +53,7 @@ function NewInstitute({ onClose, onDone, toast }) {
         <div className="grid3">
           <label className="field">Owner name<input className="input" value={f.ownerName} onChange={set('ownerName')} /></label>
           <label className="field">Mobile<input className="input" inputMode="tel" value={f.ownerPhone} onChange={set('ownerPhone')} /></label>
-          <label className="field">PIN<input className="input" inputMode="numeric" maxLength={8} value={f.ownerPin} onChange={(e) => setF({ ...f, ownerPin: e.target.value.replace(/\D/g, '') })} /></label>
+          <label className="field">PIN (6–8 digits)<input className="input" inputMode="numeric" maxLength={8} value={f.ownerPin} onChange={(e) => setF({ ...f, ownerPin: e.target.value.replace(/\D/g, '') })} /></label>
         </div>
         {error && <p className="error-text small">{error}</p>}
         <div className="row" style={{ justifyContent: 'flex-end' }}>

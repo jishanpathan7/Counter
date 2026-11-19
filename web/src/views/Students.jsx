@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { fmtDate, fmtPhone, fmtTime, navigate, useApp, useData } from '../api.js';
 import { Heatmap } from '../charts.jsx';
-import { Avatar, Drawer, Empty, Icon, Loading, Modal, PctBar } from '../ui.jsx';
+import { Avatar, CONSENT_LABEL, ConsentChip, Drawer, Empty, Icon, Loading, Modal, PctBar } from '../ui.jsx';
 
 function StudentForm({ initial, batches, onSave, onCancel, saveLabel = 'Save' }) {
   const [f, setF] = useState(initial);
@@ -31,7 +31,7 @@ function StudentForm({ initial, batches, onSave, onCancel, saveLabel = 'Save' })
 
 function Profile({ id, batches, onClose }) {
   const { api, toast, info } = useApp();
-  const { data: p, error } = useData(`/students/${id}`);
+  const { data: p, error, reload } = useData(`/students/${id}`);
   const [editing, setEditing] = useState(false);
 
   const save = async (f) => {
@@ -49,6 +49,17 @@ function Profile({ id, batches, onClose }) {
       await api.del(`/students/${id}`);
       toast(`${p.name} removed`);
       onClose();
+    } catch (e) {
+      toast(e.message, 'bad');
+    }
+  };
+
+  const consentAction = async (action) => {
+    if (action === 'clear' && !window.confirm('Remove the recorded consent? WhatsApp alerts to this parent stop until it is recorded again.')) return;
+    try {
+      await api.post(`/students/${id}/consent`, { action });
+      reload();
+      toast(action === 'clear' ? 'Consent removed' : 'Consent recorded');
     } catch (e) {
       toast(e.message, 'bad');
     }
@@ -89,6 +100,8 @@ function Profile({ id, batches, onClose }) {
             </div>
           </section>
 
+          <ConsentCard p={p} onAction={consentAction} />
+
           <div className="stat-tiles">
             <div className="stat-tile"><b className={p.stats30.pct < 75 ? 's-A' : 's-P'}>{p.stats30.pct ?? '–'}%</b><span>last 30 days</span></div>
             <div className="stat-tile"><b>{p.stats90.pct ?? '–'}%</b><span>last 90 days</span></div>
@@ -118,7 +131,9 @@ function Profile({ id, batches, onClose }) {
                         ) : a.outcome ? (
                           <span className="error-text">No reply → {a.outcome}</span>
                         ) : (
-                          <span className="muted">{a.status === 'sent' ? 'Waiting for reply' : 'Call pending'}</span>
+                          <span className={a.status === 'failed' ? 'error-text' : 'muted'}>
+                            {a.status === 'sent' ? 'Waiting for reply' : a.status === 'failed' ? `Not sent on WhatsApp: ${a.error || 'failed'} → call` : 'Call pending'}
+                          </span>
                         )}
                       </div>
                     </div>
@@ -151,6 +166,56 @@ function Profile({ id, batches, onClose }) {
         </>
       )}
     </Drawer>
+  );
+}
+
+const SOURCE_LABEL = { staff: 'admission form, recorded by the office', whatsapp: 'parent on WhatsApp' };
+
+function ConsentCard({ p, onAction }) {
+  const { info } = useApp();
+  const c = p.consent;
+  const status = c?.status ?? 'pending';
+  const [showLog, setShowLog] = useState(false);
+  return (
+    <section className="card stack tight">
+      <div className="row between">
+        <div>
+          <div className="eyebrow">WhatsApp consent</div>
+          <div className="row" style={{ gap: 8 }}>
+            <ConsentChip status={status} />
+            <span className="muted small">
+              {c ? `${SOURCE_LABEL[c.source] ?? c.source}${c.recordedBy && c.source === 'staff' ? ` (${c.recordedBy})` : ''} · ${fmtDate(c.updatedAt.slice(0, 10), { day: 'numeric', month: 'short', year: 'numeric' })}` : 'No record yet'}
+            </span>
+          </div>
+        </div>
+        <div className="row">
+          {status === 'pending' && <button className="btn small primary" onClick={() => onAction('record')}><Icon name="check" /> Signed admission form</button>}
+          {status === 'opted_in' && c.source === 'staff' && <button className="btn small ghost" onClick={() => onAction('clear')}>Remove</button>}
+        </div>
+      </div>
+      <p className="muted small">
+        {status === 'opted_out'
+          ? 'This parent sent STOP, so they get a phone call instead of WhatsApp. Only they can turn alerts back on, by sending START.'
+          : status === 'pending'
+            ? `${info.requireConsent ? 'No WhatsApp alerts until the parent agrees: absences become a call task.' : 'Alerts are sent, but consent is not recorded.'} Ask them to send START${info.optInPhone ? ` to ${fmtPhone(info.optInPhone)}` : ''}, or record their signed admission form.`
+            : 'Absence alerts go to this parent on WhatsApp. They can reply STOP at any time.'}
+      </p>
+      {p.consentLog?.length > 0 && (
+        <div>
+          <button className="btn link small" onClick={() => setShowLog(!showLog)}>{showLog ? 'Hide' : 'Show'} consent history ({p.consentLog.length})</button>
+          {showLog && (
+            <ul className="small muted" style={{ margin: '6px 0 0', paddingLeft: 18 }}>
+              {p.consentLog.map((l, i) => (
+                <li key={i}>
+                  {fmtDate(l.at.slice(0, 10), { day: 'numeric', month: 'short' })} {fmtTime(l.at)} · {l.status === 'cleared' ? 'Removed' : CONSENT_LABEL[l.status]} · {SOURCE_LABEL[l.source] ?? l.source}{l.recordedBy ? ` (${l.recordedBy})` : ''}
+                  {l.wording && <div className="tiny">“{l.wording}”</div>}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -229,10 +294,11 @@ function Import({ batches, onClose }) {
 export default function Students() {
   const { route, api, toast, info } = useApp();
   const { data: batches } = useData('/batches');
-  const { data } = useData('/students');
+  const { data, reload } = useData('/students');
   const [q, setQ] = useState('');
   const [batch, setBatch] = useState('');
   const [riskOnly, setRiskOnly] = useState(false);
+  const [noConsent, setNoConsent] = useState(false);
   const [sort, setSort] = useState({ key: 'name', dir: 1 });
   const [adding, setAdding] = useState(false);
   const [importing, setImporting] = useState(false);
@@ -242,6 +308,7 @@ export default function Students() {
     let r = data ?? [];
     if (batch) r = r.filter((s) => s.batchId === Number(batch));
     if (riskOnly) r = r.filter((s) => s.atRisk);
+    if (noConsent) r = r.filter((s) => s.consentStatus !== 'opted_in');
     if (q.trim()) {
       const t = q.toLowerCase();
       r = r.filter((s) => s.name.toLowerCase().includes(t) || (s.parentName ?? '').toLowerCase().includes(t) || s.parentPhone.includes(t.replace(/\D/g, '') || '§'));
@@ -252,7 +319,7 @@ export default function Students() {
       const vb = b[k] ?? -1;
       return (typeof va === 'string' ? va.localeCompare(vb) : va - vb) * sort.dir;
     });
-  }, [data, batch, riskOnly, q, sort]);
+  }, [data, batch, riskOnly, noConsent, q, sort]);
 
   const th = (key, label) => (
     <th>
@@ -273,6 +340,30 @@ export default function Students() {
   };
 
   const atRisk = (data ?? []).filter((s) => s.atRisk).length;
+  const parents = new Map((data ?? []).map((s) => [s.parentPhone, s.consentStatus]));
+  const agreed = [...parents.values()].filter((v) => v === 'opted_in').length;
+  const notAsked = [...parents.values()].filter((v) => !v).length;
+  const optInLink = info.optInPhone ? `https://wa.me/${info.optInPhone}?text=START` : null;
+
+  const recordAll = async () => {
+    const scope = batch ? batches.find((b) => b.id === Number(batch))?.name : 'all batches';
+    if (!window.confirm(`Record WhatsApp consent for the ${notAsked} parent${notAsked === 1 ? '' : 's'} with no record in ${scope}?\n\nOnly do this if their signed admission forms say they agree to attendance alerts on WhatsApp. Parents who sent STOP are not changed.`)) return;
+    try {
+      const r = await api.post('/consents/record-all', { batchId: batch || null });
+      reload();
+      toast(`Consent recorded for ${r.recorded} parent${r.recorded === 1 ? '' : 's'}`);
+    } catch (e) {
+      toast(e.message, 'bad');
+    }
+  };
+  const copyLink = async () => {
+    try {
+      await navigator.clipboard.writeText(optInLink);
+      toast('Opt-in link copied. Share it with parents or print it as a QR code.');
+    } catch {
+      window.prompt('Copy this link:', optInLink);
+    }
+  };
 
   return (
     <div>
@@ -280,8 +371,21 @@ export default function Students() {
         <div>
           <h1>Students</h1>
           <p className="muted">{data ? `${data.length} students · ${atRisk} need attention` : 'Loading…'} · attendance over the last 30 days</p>
+          {data?.length > 0 && (
+            <p className="small" style={{ marginTop: 4 }}>
+              <b className={agreed === parents.size ? 'ok-text' : ''}>{agreed} of {parents.size} parents</b> agreed to WhatsApp alerts
+              {agreed < parents.size && (
+                <>
+                  {' · '}
+                  <button className="btn link small" onClick={() => setNoConsent(true)}>show the rest</button>
+                </>
+              )}
+            </p>
+          )}
         </div>
         <div className="row">
+          {optInLink && <button className="btn ghost" onClick={copyLink} title={optInLink}><Icon name="chat" /> Opt-in link</button>}
+          {info.role === 'owner' && notAsked > 0 && <button className="btn ghost" onClick={recordAll}><Icon name="check" /> Record consent forms</button>}
           {info.role === 'owner' && <button className="btn ghost" onClick={() => setImporting(true)} disabled={!batches?.length}><Icon name="upload" /> Import</button>}
           <button className="btn primary" onClick={() => setAdding(true)} disabled={!batches?.length}><Icon name="plus" /> Add student</button>
         </div>
@@ -297,6 +401,7 @@ export default function Students() {
           {batches?.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
         </select>
         <label className="check"><input type="checkbox" checked={riskOnly} onChange={(e) => setRiskOnly(e.target.checked)} /> Needs attention</label>
+        <label className="check"><input type="checkbox" checked={noConsent} onChange={(e) => setNoConsent(e.target.checked)} /> No WhatsApp consent</label>
       </div>
 
       {!data ? (
@@ -324,7 +429,10 @@ export default function Students() {
                     </div>
                   </td>
                   <td className="small">{s.batchName}</td>
-                  <td className="small hide-sm">{s.parentName}<div className="muted tiny">{fmtPhone(s.parentPhone)}</div></td>
+                  <td className="small hide-sm">
+                    {s.parentName}
+                    <div className="muted tiny">{fmtPhone(s.parentPhone)}{s.consentStatus !== 'opted_in' && <> · <span className={s.consentStatus === 'opted_out' ? 'error-text' : 'warn-text'}>{CONSENT_LABEL[s.consentStatus || 'pending']}</span></>}</div>
+                  </td>
                   <td style={{ minWidth: 140 }}><PctBar pct={s.pct} /></td>
                   <td className="num">{s.A}{s.bunks ? <span className="muted tiny"> · {s.bunks} bunk</span> : ''}</td>
                   <td>{s.atRisk && <span className="chip bad" title={s.riskReasons.join(', ')}>At risk</span>}</td>

@@ -39,7 +39,7 @@ export function Login({ demo, onDone }) {
     setError('');
     try {
       await api.post('/auth/login', { phone: p, pin: k });
-      await onDone();
+      await onDone(k);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -60,7 +60,7 @@ export function Login({ demo, onDone }) {
           </label>
           <label className="field">
             PIN
-            <input className="input" type="password" inputMode="numeric" autoComplete="current-password" maxLength={8} value={pin} onChange={(e) => setPin(e.target.value.replace(/\D/g, ''))} placeholder="••••" />
+            <input className="input" type="password" inputMode="numeric" autoComplete="current-password" maxLength={8} value={pin} onChange={(e) => setPin(e.target.value.replace(/\D/g, ''))} placeholder="••••••" />
           </label>
           {error && <p className="error-text small" role="alert">{error}</p>}
           <button className="btn primary block" disabled={busy || !phone || pin.length < 4}>{busy ? 'Logging in…' : 'Log in'}</button>
@@ -89,6 +89,55 @@ export function Login({ demo, onDone }) {
   );
 }
 
+export const PIN_HINT = 'Use 6 to 8 digits. Avoid 123456, repeated digits or part of your mobile number.';
+
+/** Shown after logging in with an old or easy-to-guess PIN: nothing else works until it's changed. */
+export function NewPin({ me, onDone, logout, currentPin = '' }) {
+  const [f, setF] = useState({ next: '', again: '' });
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [cur, setCur] = useState(currentPin);
+  const pin = (k, v, set) => ({ className: 'input', type: 'password', inputMode: 'numeric', maxLength: 8, value: v, onChange: (e) => set(e.target.value.replace(/\D/g, '')), required: true });
+  const submit = async (e) => {
+    e.preventDefault();
+    setError('');
+    if (f.next.length < 6) return setError('PIN must be 6 to 8 digits');
+    if (f.next !== f.again) return setError("New PINs don't match");
+    setBusy(true);
+    try {
+      await api.post('/auth/pin', { current: cur, next: f.next });
+      await onDone();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="auth">
+      <Hero />
+      <section className="auth-panel">
+        <form className="auth-card stack" onSubmit={submit}>
+          <div>
+            <div className="eyebrow">One more step</div>
+            <h1>Set a new PIN</h1>
+            <p className="muted">Hi {me.user.name}. Your PIN is too easy to guess, so please choose a new one before you continue. It protects your students' and parents' details.</p>
+          </div>
+          <label className="field">Current PIN<input {...pin('cur', cur, setCur)} autoComplete="current-password" /></label>
+          <div className="grid2">
+            <label className="field">New PIN<input {...pin('next', f.next, (v) => setF({ ...f, next: v }))} autoComplete="new-password" autoFocus /></label>
+            <label className="field">Repeat new PIN<input {...pin('again', f.again, (v) => setF({ ...f, again: v }))} autoComplete="new-password" /></label>
+          </div>
+          <p className="muted small">{PIN_HINT}</p>
+          {error && <p className="error-text small">{error}</p>}
+          <button className="btn primary block" disabled={busy}>{busy ? 'Saving…' : 'Save new PIN'}</button>
+          <button type="button" className="btn ghost block" onClick={logout}>Log out</button>
+        </form>
+      </section>
+    </div>
+  );
+}
+
 export function SetupWizard({ onDone, setupCodeRequired }) {
   const [step, setStep] = useState(0);
   const [f, setF] = useState({ name: '', phone: '', pin: '', pin2: '', instituteName: '', city: '', setupCode: '' });
@@ -99,7 +148,7 @@ export function SetupWizard({ onDone, setupCodeRequired }) {
   const next = (e) => {
     e.preventDefault();
     setError('');
-    if (f.pin.length < 4) return setError('PIN must be at least 4 digits');
+    if (f.pin.length < 6) return setError('PIN must be 6 to 8 digits');
     if (f.pin !== f.pin2) return setError("PINs don't match");
     setStep(1);
   };
@@ -134,9 +183,10 @@ export function SetupWizard({ onDone, setupCodeRequired }) {
               <label className="field">Your name<input className="input" value={f.name} onChange={set('name')} required autoFocus /></label>
               <label className="field">Mobile number<input className="input" inputMode="tel" value={f.phone} onChange={set('phone')} required placeholder="98765 43210" /></label>
               <div className="grid2">
-                <label className="field">PIN (4–8 digits)<input className="input" type="password" inputMode="numeric" maxLength={8} value={f.pin} onChange={(e) => setF({ ...f, pin: e.target.value.replace(/\D/g, '') })} required /></label>
+                <label className="field">PIN (6–8 digits)<input className="input" type="password" inputMode="numeric" maxLength={8} value={f.pin} onChange={(e) => setF({ ...f, pin: e.target.value.replace(/\D/g, '') })} required /></label>
                 <label className="field">Repeat PIN<input className="input" type="password" inputMode="numeric" maxLength={8} value={f.pin2} onChange={(e) => setF({ ...f, pin2: e.target.value.replace(/\D/g, '') })} required /></label>
               </div>
+              <p className="muted small">{PIN_HINT}</p>
               {error && <p className="error-text small">{error}</p>}
               <button className="btn primary block">Continue</button>
             </form>
