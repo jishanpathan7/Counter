@@ -9,6 +9,7 @@ import { hasColumn, runMigrations } from './migrate.js';
 
 /** Platform database changes, in order. Add new ones at the end; never edit old ones. */
 const PLATFORM_MIGRATIONS = [
+  // (version 1 below; versions run in number order)
   {
     version: 1,
     name: 'plans and billing',
@@ -21,6 +22,11 @@ const PLATFORM_MIGRATIONS = [
         ALTER TABLE institutes ADD COLUMN payment_link TEXT;
         ALTER TABLE institutes ADD COLUMN billing TEXT;`);
     },
+  },
+  {
+    version: 2,
+    name: 'referrals',
+    up: (db) => hasColumn(db, 'institutes', 'referral_code') || db.exec('ALTER TABLE institutes ADD COLUMN referral_code TEXT'),
   },
 ];
 import { AttendanceService, HttpError, mapLimit, normalizePhone } from './service.js';
@@ -110,6 +116,16 @@ CREATE TABLE IF NOT EXISTS payments (
   paid_at        TEXT NOT NULL,                 -- 'YYYY-MM-DD'
   invoice_no     TEXT NOT NULL UNIQUE,
   recorded_by    TEXT,
+  created_at     TEXT NOT NULL
+);
+-- Referral partners and resellers, and how many people opened the site through their link.
+CREATE TABLE IF NOT EXISTS referrals (
+  id             INTEGER PRIMARY KEY,
+  code           TEXT NOT NULL UNIQUE,
+  name           TEXT NOT NULL,
+  kind           TEXT NOT NULL DEFAULT 'referral' CHECK (kind IN ('referral', 'reseller')),
+  commission_pct REAL NOT NULL DEFAULT 0,
+  visits         INTEGER NOT NULL DEFAULT 0,
   created_at     TEXT NOT NULL
 );
 -- Institutes deleted for good (the institute's own privacy log goes with its database).
@@ -398,6 +414,7 @@ export class Platform {
       billingCycle: i.billing_cycle,
       paidUntil: i.paid_until,
       paymentLink: i.payment_link,
+      referralCode: i.referral_code ?? null,
       billing: { ...billingState({ plan: i.plan, paidUntil: i.paid_until }, this.today()) },
     };
   }
@@ -408,7 +425,8 @@ export class Platform {
     return i;
   }
 
-  createInstitute({ name, slug, city = '', feeMonthly = 0, owner = null, ownerUserId = null }) {
+  createInstitute({ name, slug, city = '', feeMonthly = 0, owner = null, ownerUserId = null, referralCode = null }) {
+    const referral = referralCode ? this.referral(referralCode).code : null;
     const n = requireName(name, 'Institute name');
     const sl = slug ? String(slug).toLowerCase() : slugify(n);
     if (!SLUG_RE.test(sl)) throw new HttpError(400, 'Web address must be 3–40 lowercase letters, numbers or dashes');
@@ -423,8 +441,8 @@ export class Platform {
       ownerId = existing ? existing.id : this.createUser(owner).id;
     }
     const r = this.db
-      .prepare("INSERT INTO institutes (slug, name, city, fee_monthly, created_at, plan, paid_until) VALUES (?, ?, ?, ?, ?, 'trial', ?)")
-      .run(sl, n, String(city ?? '').trim().slice(0, 60) || null, Math.round(fee), this.nowIso(), addDaysTo(this.today(), PLANS.trial.days));
+      .prepare("INSERT INTO institutes (slug, name, city, fee_monthly, created_at, plan, paid_until, referral_code) VALUES (?, ?, ?, ?, ?, 'trial', ?, ?)")
+      .run(sl, n, String(city ?? '').trim().slice(0, 60) || null, Math.round(fee), this.nowIso(), addDaysTo(this.today(), PLANS.trial.days), referral);
     if (ownerId) {
       this.db.prepare("INSERT INTO memberships (user_id, institute_id, role) VALUES (?, ?, 'owner')").run(ownerId, Number(r.lastInsertRowid));
     }
@@ -451,13 +469,13 @@ export class Platform {
 
   /** The agency's own details for invoices (legal name, address, GSTIN, state, SAC code, invoice prefix). */
   billingProfile() {
-    return { legalName: '', address: '', gstin: '', state: '', sac: '', invoicePrefix: 'INV', upiId: '', ...JSON.parse(this.meta('billingProfile') || '{}') };
+    return { legalName: '', address: '', gstin: '', state: '', sac: '', invoicePrefix: 'INV', upiId: '', salesWhatsapp: '', ...JSON.parse(this.meta('billingProfile') || '{}') };
   }
 
   setBillingProfile(patch = {}) {
     const cur = this.billingProfile();
     const next = { ...cur };
-    for (const k of ['legalName', 'address', 'gstin', 'state', 'sac', 'invoicePrefix', 'upiId']) {
+    for (const k of ['legalName', 'address', 'gstin', 'state', 'sac', 'invoicePrefix', 'upiId', 'salesWhatsapp']) {
       if (patch[k] === undefined) continue;
       const v = String(patch[k] ?? '').trim().slice(0, k === 'address' ? 300 : 80);
       if (k === 'gstin' && v && !/^\d{2}[A-Z0-9]{13}$/i.test(v)) throw new HttpError(400, 'GSTIN should be 15 characters, starting with the 2-digit state code');
@@ -513,6 +531,7 @@ export class Platform {
     if (!['monthly', 'yearly'].includes(cycle)) throw new HttpError(400, 'Billing must be monthly or yearly');
     let paidUntil = patch.paidUntil !== undefined ? patch.paidUntil || null : i.paid_until;
     if (paidUntil && !/^\d{4}-\d{2}-\d{2}$/.test(paidUntil)) throw new HttpError(400, 'Paid-until must be a date');
+    const referral = patch.referralCode !== undefined ? (patch.referralCode ? this.referral(patch.referralCode).code : null) : i.referral_code;
     const link = patch.paymentLink !== undefined ? String(patch.paymentLink || '').trim() || null : i.payment_link;
     if (link && !/^(https:\/\/|upi:\/\/)/i.test(link)) throw new HttpError(400, 'The payment link should start with https:// or upi://');
     const buyer = { ...JSON.parse(i.billing || '{}') };
@@ -525,8 +544,8 @@ export class Platform {
     const fee = plan === 'custom' ? (patch.feeMonthly !== undefined ? Math.max(0, Math.round(Number(patch.feeMonthly) || 0)) : i.fee_monthly) : PLANS[plan].monthly;
     if (plan === 'trial' && i.plan !== 'trial' && patch.paidUntil === undefined) paidUntil = addDaysTo(this.today(), PLANS.trial.days);
     this.db
-      .prepare('UPDATE institutes SET plan = ?, billing_cycle = ?, paid_until = ?, payment_link = ?, billing = ?, fee_monthly = ? WHERE id = ?')
-      .run(plan, cycle, paidUntil, link, JSON.stringify(buyer), fee, i.id);
+      .prepare('UPDATE institutes SET plan = ?, billing_cycle = ?, paid_until = ?, payment_link = ?, billing = ?, fee_monthly = ?, referral_code = ? WHERE id = ?')
+      .run(plan, cycle, paidUntil, link, JSON.stringify(buyer), fee, referral, i.id);
     this.onChange(slug);
     return this.billingFor(slug);
   }
@@ -586,6 +605,70 @@ export class Platform {
       },
       this.billingProfile(),
     );
+  }
+
+  // ---------------------------------------------------------------- referrals
+
+  referral(code) {
+    const r = this.db.prepare('SELECT * FROM referrals WHERE code = ?').get(String(code ?? '').toUpperCase());
+    if (!r) throw new HttpError(404, 'No referral code like that');
+    return r;
+  }
+
+  createReferral({ name, code, kind = 'referral', commissionPct = 0 }) {
+    const n = requireName(name, 'Partner name');
+    const c = String(code || n.replace(/[^A-Za-z0-9]/g, '').slice(0, 8) + String(Math.floor(Math.random() * 90 + 10)))
+      .toUpperCase()
+      .replace(/[^A-Z0-9-]/g, '')
+      .slice(0, 16);
+    if (c.length < 3) throw new HttpError(400, 'Code must be at least 3 letters or numbers');
+    if (!['referral', 'reseller'].includes(kind)) throw new HttpError(400, 'Kind must be referral or reseller');
+    const pct = Number(commissionPct) || 0;
+    if (pct < 0 || pct > 100) throw new HttpError(400, 'Commission must be 0–100%');
+    if (this.db.prepare('SELECT 1 FROM referrals WHERE code = ?').get(c)) throw new HttpError(409, `The code ${c} is taken`);
+    this.db.prepare('INSERT INTO referrals (code, name, kind, commission_pct, created_at) VALUES (?, ?, ?, ?, ?)').run(c, n, kind, pct, this.nowIso());
+    return this.listReferrals().find((r) => r.code === c);
+  }
+
+  /** Each partner with visits, institutes signed, paying institutes and the commission they've earned this month. */
+  listReferrals() {
+    return this.db
+      .prepare('SELECT * FROM referrals ORDER BY created_at DESC')
+      .all()
+      .map((r) => {
+        const insts = this.db.prepare('SELECT * FROM institutes WHERE referral_code = ?').all(r.code);
+        const paying = insts.filter((i) => i.status === 'active' && i.plan !== 'trial' && billingState({ plan: i.plan, paidUntil: i.paid_until }, this.today()).state !== 'lapsed');
+        const mrr = paying.reduce((sum, i) => sum + i.fee_monthly, 0);
+        return {
+          code: r.code,
+          name: r.name,
+          kind: r.kind,
+          commissionPct: r.commission_pct,
+          visits: r.visits,
+          institutes: insts.map((i) => ({ slug: i.slug, name: i.name, plan: i.plan })),
+          paying: paying.length,
+          mrr,
+          commissionMonthly: Math.round(mrr * r.commission_pct) / 100,
+        };
+      });
+  }
+
+  /** Someone opened the site through a partner's link (anonymous count). */
+  recordReferralVisit(code) {
+    return this.db.prepare('UPDATE referrals SET visits = visits + 1 WHERE code = ?').run(String(code ?? '').toUpperCase().slice(0, 16)).changes > 0;
+  }
+
+  /** What the public landing page needs: prices, the sales WhatsApp number, demo or not. */
+  publicInfo() {
+    const p = this.billingProfile();
+    return {
+      brand: p.legalName && !/sample/i.test(p.legalName) ? p.legalName : 'Attendance Alert',
+      salesWhatsapp: (p.salesWhatsapp || '').replace(/\D/g, '') || null,
+      plans: Object.entries(PLANS)
+        .filter(([k]) => !['custom', 'trial'].includes(k))
+        .map(([id, v]) => ({ id, name: v.name, monthly: v.monthly, students: v.students, logins: v.logins, fullReports: v.fullReports })),
+      trialDays: PLANS.trial.days,
+    };
   }
 
   /** Limits from the plan, checked before adding students or team members. */

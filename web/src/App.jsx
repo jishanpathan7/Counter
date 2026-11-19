@@ -5,6 +5,7 @@ import { Login, NewPin, SetupWizard } from './views/Auth.jsx';
 import Agency from './views/Agency.jsx';
 import Dashboard from './views/Dashboard.jsx';
 import Today from './views/Today.jsx';
+import Landing from './views/Landing.jsx';
 import Teacher from './views/Teacher.jsx';
 import Students from './views/Students.jsx';
 import Tasks from './views/Tasks.jsx';
@@ -293,7 +294,8 @@ export default function App() {
   if (failed) return <div className="center error-text">Can't reach the server. Is it running?</div>;
   if (!me) return <div className="center muted">Loading…</div>;
   if (me.needsSetup) return <SetupWizard onDone={refreshMe} setupCodeRequired={me.setupCodeRequired} />;
-  if (!me.user) return <Login demo={me.demo} onDone={(pin) => { setTypedPin(pin); return refreshMe(); }} />;
+  if (!me.user && path === '/') return <Landing />;
+  if (!me.user) return <Login demo={me.demo} onDone={(pin) => { setTypedPin(pin); if (path === '/login') navigate('/'); return refreshMe(); }} />;
   if (me.user.mustChangePin) {
     return <NewPin me={me} currentPin={typedPin} logout={logout} onDone={() => { setTypedPin(''); return refreshMe(); }} />;
   }

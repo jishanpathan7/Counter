@@ -178,6 +178,13 @@ export function createApp({ platform, hub, demo = false, setupToken = null, real
     res.status(201).json({ user: platform.publicUser(user), institute: inst });
   });
 
+  // Public: the landing page's prices and contact number, and anonymous referral-link visits.
+  app.get('/api/public/landing', (_req, res) => res.json({ ...platform.publicInfo(), demo }));
+  app.post('/api/public/visit', (req, res) => {
+    const ok = req.body?.ref ? platform.recordReferralVisit(req.body.ref) : false;
+    res.json({ ok });
+  });
+
   app.use('/api', (req, _res, next) => {
     req.user = userOf(req);
     if (!req.user) throw new HttpError(401, 'Please log in');
@@ -200,9 +207,9 @@ export function createApp({ platform, hub, demo = false, setupToken = null, real
   });
   agency.get('/overview', (_req, res) => res.json(platform.agencyOverview()));
   agency.post('/institutes', (req, res) => {
-    const { name, slug, city, feeMonthly, ownerName, ownerPhone, ownerPin } = req.body ?? {};
+    const { name, slug, city, feeMonthly, ownerName, ownerPhone, ownerPin, referralCode } = req.body ?? {};
     const owner = ownerPhone ? { name: ownerName, phone: ownerPhone, pin: ownerPin } : null;
-    res.status(201).json(platform.createInstitute({ name, slug, city, feeMonthly, owner, ownerUserId: owner ? null : req.user.id }));
+    res.status(201).json(platform.createInstitute({ name, slug, city, feeMonthly, owner, ownerUserId: owner ? null : req.user.id, referralCode: referralCode || null }));
   });
   agency.patch('/institutes/:slug', (req, res) => res.json(platform.updateInstitute(req.params.slug, req.body ?? {})));
   agency.post('/institutes/:slug/delete', (req, res) => res.json(platform.deleteInstitute(req.params.slug, { confirm: req.body?.confirm, actor: req.user.name })));
@@ -212,6 +219,8 @@ export function createApp({ platform, hub, demo = false, setupToken = null, real
     if (!requestLog) return res.json([]);
     res.json(requestLog.list({ limit: req.query.limit, userId: req.query.userId ? Number(req.query.userId) : null, from: req.query.from || null }));
   });
+  agency.get('/referrals', (_req, res) => res.json(platform.listReferrals()));
+  agency.post('/referrals', (req, res) => res.status(201).json(platform.createReferral(req.body ?? {})));
   agency.get('/billing-profile', (_req, res) => res.json(platform.billingProfile()));
   agency.put('/billing-profile', (req, res) => res.json(platform.setBillingProfile(req.body ?? {})));
   agency.get('/institutes/:slug/billing', (req, res) => res.json({ ...platform.billingFor(req.params.slug), payments: platform.listPayments(req.params.slug) }));

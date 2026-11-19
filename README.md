@@ -96,6 +96,21 @@ replies and calls are never limited.
   (about 4 alerts per student per month are included). Institutes from before plans existed are
   on "Custom" with no due date, so nothing changes for them until the agency sets a plan.
 
+### Landing page and referrals
+
+Logged-out visitors see a landing page at `/`. It explains how the app works, shows what parents
+receive, and lists the prices and common questions. It has a "Chat with us on WhatsApp" button
+(the agency's sales number, set under Business details) and "Try the demo" in demo mode. Login
+moves to `/login`.
+
+Partners and resellers get links like `/?ref=KOTA10`:
+- visits are counted once per browser session;
+- the code is pre-filled in the prospect's WhatsApp message;
+- the agency picks the partner on the institute's billing page.
+
+The Referrals panel shows each partner's visits, institutes, how many pay, and the commission due
+each month.
+
 ### Login security
 
 - PINs are 6–8 digits and can't be `123456`, one digit repeated, a simple pattern or part of the

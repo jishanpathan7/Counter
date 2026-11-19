@@ -73,12 +73,16 @@ function BillingPanel({ inst, onClose, onDone, toast }) {
   const [b, setB] = useState(null);
   const [f, setF] = useState(null);
   const [pay, setPay] = useState({ amount: '', method: 'UPI', reference: '', paidAt: '' });
+  const [partners, setPartners] = useState([]);
+  useEffect(() => {
+    api.get('/agency/referrals').then(setPartners).catch(() => {});
+  }, []);
   const [error, setError] = useState('');
   const load = useCallback(
     () =>
       api.get(`/agency/institutes/${inst.slug}/billing`).then((r) => {
         setB(r);
-        setF({ plan: r.plan, cycle: r.cycle, paidUntil: r.paidUntil ?? '', paymentLink: inst.paymentLink ?? '', feeMonthly: inst.feeMonthly, ...r.buyer });
+        setF({ plan: r.plan, cycle: r.cycle, paidUntil: r.paidUntil ?? '', paymentLink: inst.paymentLink ?? '', feeMonthly: inst.feeMonthly, referralCode: inst.referralCode ?? '', ...r.buyer });
       }),
     [inst.slug, inst.paymentLink, inst.feeMonthly],
   );
@@ -152,6 +156,13 @@ function BillingPanel({ inst, onClose, onDone, toast }) {
               <label className="field">GSTIN (if registered)<input className="input" value={f.gstin ?? ''} onChange={set('gstin')} /></label>
               <label className="field">State<input className="input" value={f.state ?? ''} onChange={set('state')} placeholder="e.g. Madhya Pradesh" /><span className="hint">Same state as yours: CGST + SGST. Otherwise IGST.</span></label>
               <label className="field">Address<input className="input" value={f.address ?? ''} onChange={set('address')} /></label>
+              <label className="field">
+                Referred by
+                <select className="select" value={f.referralCode ?? ''} onChange={set('referralCode')}>
+                  <option value="">Nobody</option>
+                  {partners.map((r) => <option key={r.code} value={r.code}>{r.name} ({r.code})</option>)}
+                </select>
+              </label>
             </div>
             <div><button className="btn primary">Save</button></div>
           </form>
@@ -214,6 +225,70 @@ function AuthLog({ onClose }) {
   );
 }
 
+/** Partners and resellers: their link, visits, institutes and commission. */
+function Referrals({ onClose, toast }) {
+  const [rows, setRows] = useState(null);
+  const [f, setF] = useState({ name: '', code: '', kind: 'referral', commissionPct: 10 });
+  const load = useCallback(() => api.get('/agency/referrals').then(setRows), []);
+  useEffect(() => {
+    load().catch(() => setRows([]));
+  }, [load]);
+  const add = async (e) => {
+    e.preventDefault();
+    try {
+      const r = await api.post('/agency/referrals', { ...f, commissionPct: Number(f.commissionPct) || 0 });
+      toast(`Added ${r.name}: their link uses ?ref=${r.code}`);
+      setF({ name: '', code: '', kind: 'referral', commissionPct: 10 });
+      load();
+    } catch (err) {
+      toast(err.message, 'bad');
+    }
+  };
+  const link = (code) => `${window.location.origin}/?ref=${code}`;
+  return (
+    <Modal title="Referrals and resellers" onClose={onClose} wide>
+      <div className="stack">
+        <p className="muted small">Give each partner their link. Visits are counted, the code appears in the WhatsApp message a prospect sends you, and you pick the partner on the institute's billing page. Commission is worked out on what their paying institutes pay each month.</p>
+        {!rows ? <p className="muted">Loading…</p> : rows.length ? (
+          <div className="table-wrap">
+            <table className="table">
+              <thead><tr><th>Partner</th><th>Link</th><th className="num">Visits</th><th>Institutes</th><th className="num">Paying</th><th className="num">Commission / month</th></tr></thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.code}>
+                    <td><b>{r.name}</b><div className="muted tiny">{r.kind === 'reseller' ? 'Reseller' : 'Referral'} · {r.commissionPct}%</div></td>
+                    <td><button className="btn link small" onClick={() => navigator.clipboard?.writeText(link(r.code)).then(() => toast('Link copied'))}>?ref={r.code}</button></td>
+                    <td className="num">{r.visits}</td>
+                    <td className="small">{r.institutes.map((i) => i.name).join(', ') || '—'}</td>
+                    <td className="num">{r.paying}</td>
+                    <td className="num">₹{r.commissionMonthly.toLocaleString('en-IN')}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : <p className="muted">No partners yet.</p>}
+        <form className="stack" onSubmit={add}>
+          <h3>Add a partner</h3>
+          <div className="grid2">
+            <label className="field">Name<input className="input" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} required /></label>
+            <label className="field">Code (optional)<input className="input" value={f.code} onChange={(e) => setF({ ...f, code: e.target.value })} placeholder="made from the name" /></label>
+            <label className="field">
+              Type
+              <select className="select" value={f.kind} onChange={(e) => setF({ ...f, kind: e.target.value })}>
+                <option value="referral">Referral (introduces institutes)</option>
+                <option value="reseller">Reseller (sells and supports them)</option>
+              </select>
+            </label>
+            <label className="field">Commission (%)<input className="input" type="number" min="0" max="100" step="any" value={f.commissionPct} onChange={(e) => setF({ ...f, commissionPct: e.target.value })} /></label>
+          </div>
+          <div><button className="btn primary">Add partner</button></div>
+        </form>
+      </div>
+    </Modal>
+  );
+}
+
 /** The agency's own details printed on invoices. */
 function BillingProfile({ onClose, toast }) {
   const [f, setF] = useState(null);
@@ -233,7 +308,7 @@ function BillingProfile({ onClose, toast }) {
     }
   };
   return (
-    <Modal title="Your invoice details" onClose={onClose}>
+    <Modal title="Your business details" onClose={onClose}>
       {!f ? <p className="muted">Loading…</p> : (
         <form className="stack" onSubmit={save}>
           <label className="field">Legal / business name<input className="input" value={f.legalName} onChange={set('legalName')} required /></label>
@@ -244,6 +319,7 @@ function BillingProfile({ onClose, toast }) {
             <label className="field">SAC code<input className="input" value={f.sac} onChange={set('sac')} /><span className="hint">The service code for your invoices. Confirm it with your CA.</span></label>
             <label className="field">Invoice prefix<input className="input" value={f.invoicePrefix} onChange={set('invoicePrefix')} /></label>
             <label className="field">UPI ID<input className="input" value={f.upiId} onChange={set('upiId')} placeholder="yourname@okaxis" /><span className="hint">For pay-by-UPI links when an institute has no payment link.</span></label>
+            <label className="field">Your sales WhatsApp<input className="input" inputMode="tel" value={f.salesWhatsapp ?? ''} onChange={set('salesWhatsapp')} placeholder="91 98765 43210" /><span className="hint">The "Chat with us" button on the public landing page.</span></label>
           </div>
           {error && <p className="error-text small">{error}</p>}
           <div className="row" style={{ justifyContent: 'flex-end' }}>
@@ -262,6 +338,7 @@ export default function Agency({ me, logout, theme, toast }) {
   const [editing, setEditing] = useState(null);
   const [profile, setProfile] = useState(false);
   const [authLog, setAuthLog] = useState(false);
+  const [referrals, setReferrals] = useState(false);
   const load = useCallback(() => api.get('/agency/overview').then(setData).catch((e) => toast(e.message, 'bad')), [toast]);
   useEffect(() => {
     load();
@@ -311,7 +388,8 @@ export default function Agency({ me, logout, theme, toast }) {
           </div>
           <div className="row">
             <button className="btn ghost" onClick={() => setAuthLog(true)}>Sign-in log</button>
-            <button className="btn ghost" onClick={() => setProfile(true)}>Invoice details</button>
+            <button className="btn ghost" onClick={() => setReferrals(true)}>Referrals</button>
+            <button className="btn ghost" onClick={() => setProfile(true)}>Business details</button>
             <button className="btn primary" onClick={() => setAdding(true)}><Icon name="plus" /> Add institute</button>
           </div>
         </div>
@@ -383,6 +461,7 @@ export default function Agency({ me, logout, theme, toast }) {
       {editing && <BillingPanel inst={editing} toast={toast} onClose={() => setEditing(null)} onDone={load} />}
       {profile && <BillingProfile toast={toast} onClose={() => setProfile(false)} />}
       {authLog && <AuthLog onClose={() => setAuthLog(false)} />}
+      {referrals && <Referrals toast={toast} onClose={() => setReferrals(false)} />}
     </div>
   );
 }
