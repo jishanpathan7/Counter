@@ -92,6 +92,17 @@ With `SEED_DEMO=false`, a fresh install opens a setup wizard where you create yo
 institute. Data lives in `DATA_DIR` (default `data/`): `platform.db` holds users and institutes, and
 `institutes/<name>.db` holds each institute's data. Back up that folder.
 
+## Deploying on Vercel (demo)
+
+The repo deploys to Vercel as-is: `vercel.json` builds the app into `dist/` and runs the API from
+`api/index.js` as one serverless function. Set a `SESSION_SECRET` environment variable (any long
+random string) so logins work across function instances.
+
+On Vercel the app runs in **demo mode**: data lives in the function's temporary folder and is reset
+whenever Vercel starts a fresh instance, the alert timers run as requests come in, and screens
+refresh every few seconds instead of over a live connection. For real institutes, use a host with
+an always-on server and a disk (`npm start`), or move the data to a hosted database.
+
 ## Connecting real WhatsApp
 
 Each institute connects its own WhatsApp Business number in **Settings → WhatsApp & message**.

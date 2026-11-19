@@ -72,6 +72,7 @@ export function Login({ demo, onDone }) {
                 <b className="small">Demo accounts</b>
                 <span className="tiny muted">PIN {demo.pin}</span>
               </div>
+              {demo.ephemeral && <p className="tiny muted" style={{ margin: '6px 0 0' }}>Demo server: changes you make reset from time to time.</p>}
               <div className="demo-logins">
                 {demo.logins.map((l) => (
                   <button key={l.phone} type="button" onClick={() => { setPhone(l.phone); setPin(demo.pin); submit(null, l.phone, demo.pin); }}>

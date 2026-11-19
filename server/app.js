@@ -48,7 +48,7 @@ function csvCell(v) {
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-export function createApp({ platform, hub, demo = false, staticDir = null, logger = console }) {
+export function createApp({ platform, hub, demo = false, realtime = true, ephemeral = false, tickOnRequest = null, staticDir = null, logger = console }) {
   const app = express();
   app.disable('x-powered-by');
   app.use(express.json({ limit: '1mb', verify: (req, _res, buf) => (req.rawBody = buf) }));
@@ -56,6 +56,18 @@ export function createApp({ platform, hub, demo = false, staticDir = null, logge
     res.set({ 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'same-origin', 'X-Frame-Options': 'DENY' });
     next();
   });
+
+  // Serverless hosts have no background timer: run the scheduler as requests come in.
+  if (tickOnRequest) {
+    app.use(['/api', '/webhooks'], async (_req, _res, next) => {
+      try {
+        await tickOnRequest();
+      } catch (err) {
+        logger.error?.('Scheduler tick failed:', err);
+      }
+      next();
+    });
+  }
 
   // ------------------------------------------------------------------ WhatsApp webhooks (one per institute)
   const webhookService = (slug) => {
@@ -103,7 +115,7 @@ export function createApp({ platform, hub, demo = false, staticDir = null, logge
       needsSetup: platform.needsSetup(),
       user: platform.publicUser(u),
       memberships: u ? platform.membershipsFor(u) : [],
-      demo: demo ? { pin: DEMO_PIN, logins: DEMO_LOGINS } : null,
+      demo: demo ? { pin: DEMO_PIN, logins: DEMO_LOGINS, ephemeral } : null,
     });
   });
 
@@ -196,12 +208,14 @@ export function createApp({ platform, hub, demo = false, staticDir = null, logge
       batchIds,
       user: platform.publicUser(req.user),
       mode: req.svc.messenger.mode,
+      realtime,
       tz: req.svc.tz,
       today: req.svc.today(),
     });
   });
 
   inst.get('/events', (req, res) => {
+    if (!realtime) return res.sendStatus(204); // screens poll instead
     res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
     res.flushHeaders();
     res.write('retry: 3000\n\n');

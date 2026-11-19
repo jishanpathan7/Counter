@@ -77,12 +77,18 @@ function InstituteApp({ slug, me, logout, theme }) {
   useEffect(() => {
     if (!info) return undefined;
     setDefaultTz(info.tz);
+    if (!info.realtime) {
+      // Serverless hosting: no live connection, so refresh every few seconds instead.
+      setLive(true);
+      const t = setInterval(() => document.visibilityState === 'visible' && setVersion((v) => v + 1), 4000);
+      return () => clearInterval(t);
+    }
     const es = new EventSource(`/api/i/${slug}/events`);
     es.onmessage = () => setVersion((v) => v + 1);
     es.onopen = () => setLive(true);
     es.onerror = () => setLive(false);
     return () => es.close();
-  }, [info, slug]);
+  }, [info?.realtime, info?.tz, slug]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!info || info.role === 'teacher') return;
