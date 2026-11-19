@@ -29,7 +29,8 @@ export function TrendChart({ series, height = 220 }) {
           const w = Math.max(2, bw * 0.7);
           const segs = [
             ['P', s.P, 'var(--green)'],
-            ['L', s.L, 'var(--amber)'],
+            ['T', s.T ?? 0, 'var(--amber)'],
+            ['L', s.L, 'var(--blue)'],
             ['A', s.A, 'var(--red)'],
           ];
           let acc = 0;
@@ -58,7 +59,7 @@ export function TrendChart({ series, height = 220 }) {
           ) : d.total ? (
             <span>
               {fmtDate(d.date, { weekday: 'short', day: 'numeric', month: 'short' })}: <b className="s-P">{d.P} present</b> ·{' '}
-              <b className="s-L">{d.L} leave/late</b> · <b className="s-A">{d.A} absent</b> · {d.pct}% attendance
+              <b className="s-T">{d.T ?? 0} late</b> · <b className="s-L">{d.L} on leave</b> · <b className="s-A">{d.A} absent</b> · {d.pct}% attendance
             </span>
           ) : (
             <span>{fmtDate(d.date, { weekday: 'short', day: 'numeric', month: 'short' })}: no classes</span>
@@ -103,7 +104,7 @@ export function Heatmap({ from, to, days, holidays }) {
     const title = hol.has(d)
       ? `${fmtDate(d)}: ${hol.get(d)}`
       : rec
-        ? `${fmtDate(d)}: ${{ P: 'Present', A: 'Absent', L: 'Leave / late' }[rec.status]}${rec.note ? ` (${rec.note})` : ''}`
+        ? `${fmtDate(d)}: ${{ P: 'Present', A: 'Absent', L: 'On leave', T: 'Late' }[rec.status]}${rec.note ? ` (${rec.note})` : ''}`
         : `${fmtDate(d)}: no class`;
     cells.push({ key: d, cls, title });
   }
@@ -114,7 +115,8 @@ export function Heatmap({ from, to, days, holidays }) {
       </div>
       <div className="legend" style={{ marginTop: 8 }}>
         <span><i style={{ background: 'var(--green)' }} /> Present</span>
-        <span><i style={{ background: 'var(--amber)' }} /> Leave / late</span>
+        <span><i style={{ background: 'var(--amber)' }} /> Late</span>
+        <span><i style={{ background: 'var(--blue)' }} /> Leave</span>
         <span><i style={{ background: 'var(--red)' }} /> Absent</span>
         <span><i style={{ background: 'var(--blue-soft)', border: '1px solid var(--blue)' }} /> Holiday</span>
         <span><i style={{ background: 'var(--surface-2)', border: '1px solid var(--line)' }} /> No class</span>

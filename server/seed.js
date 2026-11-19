@@ -91,7 +91,7 @@ function generateHistory(svc, { days, rates, seed, holidays = [], liveToday = []
   const db = svc.db;
   const batches = db.prepare('SELECT * FROM batches WHERE active = 1').all();
   const studentsOf = db.prepare('SELECT * FROM students WHERE batch_id = ? AND active = 1 ORDER BY id');
-  const insSession = db.prepare('INSERT INTO sessions (batch_id, date, starts_at, verified_at) VALUES (?, ?, ?, ?)');
+  const insSession = db.prepare('INSERT INTO sessions (batch_id, date, starts_at, submitted_at, verified_at) VALUES (?, ?, ?, ?, ?)');
   const insAtt = db.prepare('INSERT INTO attendance (session_id, student_id, status, note, source, updated_at) VALUES (?, ?, ?, ?, ?, ?)');
   const updAtt = db.prepare('UPDATE attendance SET status = ?, note = ?, source = ?, updated_at = ? WHERE session_id = ? AND student_id = ?');
   const insAlert = db.prepare('INSERT INTO alerts (session_id, student_id, phone, status, sent_at, reply, replied_at, escalated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
@@ -111,13 +111,13 @@ function generateHistory(svc, { days, rates, seed, holidays = [], liveToday = []
         if (start + 45 * 60_000 > now) continue; // still to come (or live) today
         if (d === today && liveToday.includes(b.id)) continue; // kept open so the live flow can be tried any time
         const verified = start + 10 * 60_000;
-        const sessionId = Number(insSession.run(b.id, d, startsAt, iso(verified)).lastInsertRowid);
         const markAt = start + (2 + rand() * 6) * 60_000;
+        const sessionId = Number(insSession.run(b.id, d, startsAt, iso(markAt + 60_000), iso(verified)).lastInsertRowid);
         let n = 0;
         for (const st of studentsOf.all(b.id)) {
           const rate = rates.get(st.id) ?? 0.9;
           const r = rand();
-          const status = r < rate ? 'P' : r < rate + (1 - rate) * 0.2 ? 'L' : 'A';
+          const status = r < rate ? (rand() < 0.06 ? 'T' : 'P') : r < rate + (1 - rate) * 0.2 ? 'L' : 'A';
           insAtt.run(sessionId, st.id, status, status === 'L' ? 'Leave (told the teacher)' : null, 'teacher', iso(markAt + n * 4000));
           n++;
           if (status !== 'A') continue;
@@ -141,11 +141,11 @@ function generateHistory(svc, { days, rates, seed, holidays = [], liveToday = []
               insMsg.run(st.parent_phone, 'out', `Thank you. Noted: ${REPLY_OPTIONS[choice].title}.`, null, alertId, iso(replied + 1000));
             }
           } else {
-            const escalated = sent + 3 * 60_000;
+            const escalated = sent + 10 * 60_000;
             const alertId = Number(insAlert.run(sessionId, st.id, st.parent_phone, 'escalated', iso(sent), null, null, iso(escalated)).lastInsertRowid);
             const outcome = pick([['bunk', 40], ['leave', 25], ['late', 10], ['unreachable', 25]]);
             const done = escalated + (3 + rand() * 20) * 60_000;
-            insTask.run(alertId, 'No reply in 3 min', iso(escalated), iso(done), TASK_OUTCOMES[outcome].note);
+            insTask.run(alertId, 'No reply in 10 min', iso(escalated), iso(done), TASK_OUTCOMES[outcome].note);
             updAtt.run(TASK_OUTCOMES[outcome].status, TASK_OUTCOMES[outcome].note, 'staff', iso(done), sessionId, st.id);
             if (d === today) {
               insMsg.run(st.parent_phone, 'out', body, JSON.stringify(Object.entries(REPLY_OPTIONS).map(([k, o]) => ({ id: `${k}:${alertId}`, title: o.title }))), alertId, iso(sent));

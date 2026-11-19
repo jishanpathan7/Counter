@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { fmtDate, fmtDuration, fmtTime, fmtTime24, useApp, useData, useNow } from '../api.js';
 import { AlertState, Empty, Icon, Kpi, Loading, SessionBadge, StatusPill } from '../ui.jsx';
 
-const FEED_ICON = { start: 'play', mark: 'check', verify: 'shield', alert: 'chat', reply: 'send', escalate: 'phone', call: 'phone', fail: 'alert' };
+const FEED_ICON = { start: 'play', mark: 'check', submit: 'send', verify: 'shield', alert: 'chat', reply: 'send', escalate: 'phone', call: 'phone', fail: 'alert' };
 
 export function Timeline({ events, tz }) {
   if (!events?.length) return <p className="muted small">Nothing has happened yet.</p>;
@@ -26,8 +26,10 @@ function SessionCard({ session, tz, now, isToday }) {
   const { data: timeline } = useData(showTimeline ? `/sessions/${session.id}/timeline` : null);
 
   const run = async (path, msg) => {
-    if (path === 'verify' && session.counts.unmarked > 0) {
-      const ok = window.confirm(`${session.counts.unmarked} student(s) are not marked and will count as absent. Their parents get a WhatsApp alert. Continue?`);
+    if (path === 'submit') {
+      const ok = window.confirm(
+        `Send ${session.batch.name} for the teacher? Students not marked (${session.counts.unmarked}) count as present, so their parents won't be messaged.`,
+      );
       if (!ok) return;
     }
     setBusy(true);
@@ -40,7 +42,7 @@ function SessionCard({ session, tz, now, isToday }) {
       setBusy(false);
     }
   };
-  const { P, A, L, unmarked } = session.counts;
+  const { P, A, L, T, unmarked } = session.counts;
 
   return (
     <section className="card session">
@@ -52,10 +54,11 @@ function SessionCard({ session, tz, now, isToday }) {
         <SessionBadge session={session} now={now} tz={tz} />
       </div>
       <div className="mini-counts">
-        <span className="s-P">P {P}</span>
-        <span className="s-A">A {A}</span>
-        <span className="s-L">L {L}</span>
-        {unmarked > 0 && <span className="muted">Unmarked {unmarked}</span>}
+        <span className="s-P">Present {P + T}</span>
+        {T > 0 && <span className="s-T">Late {T}</span>}
+        <span className="s-A">Absent {A}</span>
+        {L > 0 && <span className="s-L">Leave {L}</span>}
+        {unmarked > 0 && <span className="muted">Not marked {unmarked}</span>}
         <button className="link" style={{ marginLeft: 'auto' }} onClick={() => setShowTimeline((v) => !v)}>
           {showTimeline ? 'Hide timeline' : 'Timeline'}
         </button>
@@ -85,9 +88,11 @@ function SessionCard({ session, tz, now, isToday }) {
           <button className="btn ghost small" disabled={busy} onClick={() => run('start-now', 'Class timer started now')}>
             <Icon name="play" /> Start class now
           </button>
-          <button className="btn small" disabled={busy || (!session.attendanceTaken && !session.students.length)} onClick={() => run('verify', 'Verified: parents of absentees alerted')}>
-            <Icon name="send" /> Verify &amp; alert parents
-          </button>
+          {!session.submittedAt && (
+            <button className="btn small" disabled={busy || !session.students.length} onClick={() => run('submit', 'Sent for the teacher')}>
+              <Icon name="send" /> Send for teacher
+            </button>
+          )}
         </div>
       )}
     </section>
@@ -96,12 +101,11 @@ function SessionCard({ session, tz, now, isToday }) {
 
 /** The six steps from the reel, with today's numbers. */
 function Flow({ board }) {
-  const total = board.sessions.reduce((s, x) => s + x.students.length, 0);
-  const marked = board.sessions.reduce((s, x) => s + x.students.length - x.counts.unmarked, 0);
+  const sent = board.sessions.filter((s) => s.submittedAt).length;
   const verified = board.sessions.filter((s) => s.verifiedAt).length;
   const st = board.stats;
   const steps = [
-    { n: `${marked}/${total}`, label: 'Teacher marked' },
+    { n: `${sent}/${board.sessions.length}`, label: 'Classes sent by teachers' },
     { n: `${verified}/${board.sessions.length}`, label: 'Classes verified' },
     { n: st.alertsSent, label: 'WhatsApp alerts sent' },
     { n: st.replied, label: 'Parents replied' },
@@ -223,15 +227,23 @@ export default function Dashboard() {
       </div>
 
       {data.holiday && <div className="banner"><Icon name="calendar" /> Holiday: {data.holiday}. No classes and no alerts.</div>}
+      {isToday && (() => {
+        const late = sessions.filter((s) => !s.submittedAt && Date.parse(s.verifyDueAt) < now);
+        return late.length ? (
+          <div className="banner bad">
+            <Icon name="alert" /> Not sent by the teacher: {late.map((s) => s.batch.name).join(', ')}. No parent has been alerted for {late.length === 1 ? 'this class' : 'these classes'} yet.
+          </div>
+        ) : null;
+      })()}
       {isToday && <Flow board={data} />}
       {isToday && <Impact report={report} />}
 
       <div className="dash-grid">
         <div className="stack">
           <div className="kpis four">
-            <Kpi label="Present" value={stats.present} tone="ok" />
+            <Kpi label="Present" value={stats.present} tone="ok" hint={stats.late ? `${stats.late} arrived late` : undefined} />
             <Kpi label="Absent" value={stats.absent} tone="bad" />
-            <Kpi label="Leave / late" value={stats.leaveLate} tone="warn" />
+            <Kpi label="On leave" value={stats.leave} tone="warn" />
             <Kpi label="Informed after" value={stats.avgMinutesToAlert == null ? '–' : `${stats.avgMinutesToAlert}m`} hint="class start → WhatsApp" />
           </div>
           {sessions.length ? (

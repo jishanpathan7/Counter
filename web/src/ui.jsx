@@ -62,7 +62,7 @@ export function Avatar({ name, lg }) {
 }
 
 // ------------------------------------------------------------------ status bits
-export const STATUS_LABEL = { P: 'Present', A: 'Absent', L: 'Leave / Late' };
+export const STATUS_LABEL = { P: 'Present', A: 'Absent', L: 'On leave', T: 'Late' };
 
 export function StatusPill({ status }) {
   if (!status) return <span className="pill none">Not marked</span>;
@@ -104,12 +104,11 @@ export function AlertState({ alert, task, now, tz }) {
 export function SessionBadge({ session, now, tz }) {
   if (session.verifiedAt) return <span className="chip ok">Verified · {fmtTime(session.verifiedAt, tz)}</span>;
   const toStart = Date.parse(session.startsAt) - now;
-  if (toStart > 0) return <span className="chip">Starts {fmtTime(session.startsAt, tz)}</span>;
   const left = Date.parse(session.verifyDueAt) - now;
-  if (!session.attendanceTaken) {
-    return <span className="chip warn pulse">{left > 0 ? `Take attendance · ${fmtCountdown(left)}` : 'Attendance not taken'}</span>;
-  }
-  return <span className="chip live">Auto-verify in {fmtCountdown(left)}</span>;
+  if (session.submittedAt) return <span className="chip live">Sent · alerts in {fmtCountdown(left)}</span>;
+  if (toStart > 0) return <span className="chip">Starts {fmtTime(session.startsAt, tz)}</span>;
+  if (left > 0) return <span className="chip warn pulse">Teacher marking · due in {fmtCountdown(left)}</span>;
+  return <span className="chip bad pulse">Not sent by teacher</span>;
 }
 
 export function PctBar({ pct }) {

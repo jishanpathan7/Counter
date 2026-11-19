@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react';
-import { fmtTime24, useApp, useData, useNow } from '../api.js';
+import { fmtTime, fmtTime24, useApp, useData, useNow } from '../api.js';
 import { AlertState, Avatar, Empty, Icon, Loading, SessionBadge } from '../ui.jsx';
 
-const BUTTONS = [
-  { status: 'P', label: 'P', title: 'Present' },
-  { status: 'A', label: 'A', title: 'Absent' },
-  { status: 'L', label: 'L', title: 'Leave / late' },
+// Marking by exception: everyone is present unless the teacher taps one of these.
+// Tapping the selected one again puts the student back to present.
+const EXCEPTIONS = [
+  { status: 'A', label: 'Absent' },
+  { status: 'T', label: 'Late' },
+  { status: 'L', label: 'Leave' },
 ];
 
 function savedBatch(slug) {
@@ -23,6 +25,7 @@ export default function Teacher() {
   const [session, setSession] = useState(null);
   const [blocked, setBlocked] = useState(null);
   const [pending, setPending] = useState({});
+  const [sending, setSending] = useState(false);
   const now = useNow();
 
   useEffect(() => {
@@ -45,23 +48,28 @@ export default function Teacher() {
       .catch((e) => (e.status === 409 ? setBlocked(e.message) : toast(e.message, 'bad')));
   }, [batchId, version, api, slug, toast]);
 
-  const mark = async (studentId, status) => {
-    setPending((p) => ({ ...p, [studentId]: status }));
+  const mark = async (student, status) => {
+    // Tapping the active choice again means "present after all".
+    const next = (pending[student.id] ?? student.status) === status ? 'P' : status;
+    setPending((p) => ({ ...p, [student.id]: next }));
     try {
-      setSession(await api.post(`/sessions/${session.id}/mark`, { studentId, status }));
+      setSession(await api.post(`/sessions/${session.id}/mark`, { studentId: student.id, status: next }));
     } catch (e) {
       toast(e.message, 'bad');
     } finally {
-      setPending(({ [studentId]: _, ...rest }) => rest);
+      setPending(({ [student.id]: _, ...rest }) => rest);
     }
   };
 
-  const markAllPresent = async () => {
+  const send = async () => {
+    setSending(true);
     try {
-      setSession(await api.post(`/sessions/${session.id}/mark-all`, { status: 'P' }));
-      toast('Everyone marked present');
+      setSession(await api.post(`/sessions/${session.id}/submit`));
+      toast('Sent to the office');
     } catch (e) {
       toast(e.message, 'bad');
+    } finally {
+      setSending(false);
     }
   };
 
@@ -74,14 +82,17 @@ export default function Teacher() {
     );
   }
 
-  const marked = session ? session.students.filter((s) => s.status).length : 0;
-  const total = session?.students.length ?? 0;
+  const statusOf = (s) => pending[s.id] ?? s.status ?? 'P';
+  const count = (st) => (session ? session.students.filter((s) => statusOf(s) === st).length : 0);
+  const absent = count('A');
+  const late = count('T');
+  const leave = count('L');
 
   return (
     <div className="teacher">
       <div>
         <h1>Take attendance</h1>
-        <p className="muted">Tap P, A or L. Marks save instantly; parents of absent students get a WhatsApp after verification.</p>
+        <p className="muted">Everyone is present unless you tap Absent, Late or Leave. Then send the list to the office.</p>
       </div>
       <div className="chips-row" role="tablist">
         {batches.map((b) => (
@@ -98,37 +109,37 @@ export default function Teacher() {
           <div className="session-head">
             <div>
               <div className="eyebrow">{session.batch.name} · {fmtTime24(session.batch.startTime)}</div>
-              <h2>{marked}/{total} marked</h2>
+              <h2>{session.students.length - absent - leave} of {session.students.length} in class</h2>
             </div>
             <SessionBadge session={session} now={now} />
           </div>
-          <div className="progress-line"><span style={{ width: `${total ? (marked / total) * 100 : 0}%` }} /></div>
 
           <ul className="mark-list">
             {session.students.map((s) => {
-              const current = pending[s.id] ?? s.status;
+              const current = statusOf(s);
               return (
-                <li key={s.id} className="mark-row">
+                <li key={s.id} className={`mark-row ${current !== 'P' ? `is-${current}` : ''}`}>
                   <div className="who">
                     <Avatar name={s.name} />
                     <div className="mark-info">
                       <div className="roster-name ellipsis">{s.name}</div>
                       {s.alert ? (
                         <AlertState alert={s.alert} task={s.task} now={now} />
+                      ) : s.note && s.source !== 'teacher' ? (
+                        <div className="muted small">{s.note}</div>
                       ) : (
-                        s.note && s.source !== 'teacher' && <div className="muted small">{s.note}</div>
+                        <div className="muted small">{{ P: 'Present', A: 'Absent', T: 'Late', L: 'On leave' }[current]}</div>
                       )}
                     </div>
                   </div>
-                  <div className="pal" role="group" aria-label={`Attendance for ${s.name}`}>
-                    {BUTTONS.map((b) => (
+                  <div className="pal" role="group" aria-label={`Exceptions for ${s.name}`}>
+                    {EXCEPTIONS.map((b) => (
                       <button
                         key={b.status}
-                        title={b.title}
-                        aria-label={`${b.title}: ${s.name}`}
+                        aria-label={`${b.label}: ${s.name}`}
                         aria-pressed={current === b.status}
-                        className={`pal-btn s-${b.status} ${current === b.status ? 'on' : ''}`}
-                        onClick={() => mark(s.id, b.status)}
+                        className={`pal-btn wide s-${b.status} ${current === b.status ? 'on' : ''}`}
+                        onClick={() => mark(s, b.status)}
                       >
                         {b.label}
                       </button>
@@ -140,16 +151,25 @@ export default function Teacher() {
           </ul>
           {!session.students.length && <p className="muted">No students in this batch yet.</p>}
 
-          <div className="teacher-foot">
-            <button className="btn ghost" onClick={markAllPresent} disabled={!session.students.length}>
-              <Icon name="check" /> Mark all present
-            </button>
-            <span className="muted small grow">
-              {session.verifiedAt
-                ? 'Verified. Marking someone absent now alerts their parent right away.'
-                : 'Anyone left unmarked counts as absent when verification runs.'}
+          <div className="send-bar">
+            <span className="small">
+              <b className="s-A">{absent} absent</b> · <b className="s-T">{late} late</b> · <b className="s-L">{leave} on leave</b>
             </span>
+            {session.submittedAt ? (
+              <span className="small ok-text"><Icon name="check" size={14} /> Sent {fmtTime(session.submittedAt)}</span>
+            ) : (
+              <button className="btn primary" onClick={send} disabled={sending || !session.students.length}>
+                <Icon name="send" /> Send to office
+              </button>
+            )}
           </div>
+          <p className="muted small" style={{ marginTop: 10 }}>
+            {session.verifiedAt
+              ? 'Parents have been alerted. Marking someone absent now alerts their parent right away.'
+              : session.submittedAt
+                ? `Parents of absent students get a WhatsApp at ${fmtTime(session.verifyDueAt)}. You can still change marks until then.`
+                : `Parents are only alerted after you send the list. The office expects it by ${fmtTime(session.verifyDueAt)}.`}
+          </p>
         </section>
       )}
     </div>

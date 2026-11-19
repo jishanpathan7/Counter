@@ -148,10 +148,12 @@ svg.icon { width: 18px; height: 18px; flex: none; stroke: currentColor; fill: no
 .pill.none { background: var(--surface-2); color: var(--muted); border: 1px solid var(--line); }
 .pill.s-P { background: var(--green-soft); color: var(--green); }
 .pill.s-A { background: var(--red-soft); color: var(--red); }
-.pill.s-L { background: var(--amber-soft); color: var(--amber); }
+.pill.s-L { background: var(--blue-soft); color: var(--blue); }
+.pill.s-T { background: var(--amber-soft); color: var(--amber); }
 .s-P { color: var(--green); }
 .s-A { color: var(--red); }
-.s-L { color: var(--amber); }
+.s-L { color: var(--blue); }
+.s-T { color: var(--amber); }
 
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 7px;
@@ -274,6 +276,7 @@ svg.icon { width: 18px; height: 18px; flex: none; stroke: currentColor; fill: no
 .page-head p { max-width: 680px; }
 .banner { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-radius: var(--radius); background: var(--amber-soft); color: var(--amber); border: 1px solid var(--amber-line); font-weight: 500; }
 .banner.ok { background: var(--green-soft); color: var(--green); border-color: var(--green-line); }
+.banner.bad { background: var(--red-soft); color: var(--red); border-color: var(--red-line); }
 
 /* ============================================================ dashboard */
 .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
@@ -332,7 +335,7 @@ svg.icon { width: 18px; height: 18px; flex: none; stroke: currentColor; fill: no
 .feed-dot.reply { background: var(--green-soft); color: var(--green); }
 .feed-dot.escalate, .feed-dot.fail { background: var(--red-soft); color: var(--red); }
 .feed-dot.call { background: var(--amber-soft); color: var(--amber); }
-.feed-dot.verify, .feed-dot.mark { background: var(--green-soft); color: var(--green); }
+.feed-dot.verify, .feed-dot.mark, .feed-dot.submit { background: var(--green-soft); color: var(--green); }
 .feed-text { font-size: 13px; line-height: 1.4; }
 .feed-meta { font-size: 11px; color: var(--muted); }
 
@@ -355,7 +358,11 @@ svg.icon { width: 18px; height: 18px; flex: none; stroke: currentColor; fill: no
 .pal-btn:active { transform: scale(0.94); }
 .pal-btn.on.s-P { background: var(--green-fill); border-color: var(--green-fill); color: #fff; }
 .pal-btn.on.s-A { background: var(--red); border-color: var(--red); color: #fff; }
-.pal-btn.on.s-L { background: var(--amber); border-color: var(--amber); color: #fff; }
+.pal-btn.on.s-L { background: var(--blue); border-color: var(--blue); color: #fff; }
+.pal-btn.on.s-T { background: var(--amber); border-color: var(--amber); color: #fff; }
+.pal-btn.wide { width: auto; min-width: 64px; padding: 0 10px; font-size: 13px; font-weight: 600; }
+.mark-row.is-A { background: var(--red-soft); border-radius: 10px; padding-left: 8px; padding-right: 8px; }
+.send-bar { position: sticky; bottom: 0; display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 8px; padding: 12px 0; border-top: 1px solid var(--line); background: var(--surface); }
 .progress-line { height: 4px; border-radius: 99px; background: var(--surface-2); overflow: hidden; margin-top: 12px; }
 .progress-line span { display: block; height: 100%; background: var(--green); transition: width 0.3s; }
 .teacher-foot { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; border-top: 1px solid var(--line); padding-top: 14px; }
@@ -409,7 +416,8 @@ svg.icon { width: 18px; height: 18px; flex: none; stroke: currentColor; fill: no
 .heat { width: 14px; height: 14px; border-radius: 3px; background: var(--surface-2); border: 1px solid var(--line); }
 .heat.P { background: var(--green); border-color: transparent; }
 .heat.A { background: var(--red); border-color: transparent; }
-.heat.L { background: var(--amber); border-color: transparent; }
+.heat.L { background: var(--blue); border-color: transparent; }
+.heat.T { background: var(--amber); border-color: transparent; }
 .heat.H { background: var(--blue-soft); border-color: var(--blue); }
 .heat.out { visibility: hidden; }
 .legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
@@ -515,6 +523,8 @@ svg.icon { width: 18px; height: 18px; flex: none; stroke: currentColor; fill: no
   .batch-form { grid-template-columns: 1fr 1fr; }
   .batch-form > :first-child { grid-column: 1 / -1; }
   .pal-btn { width: 42px; height: 42px; }
+  .pal-btn.wide { min-width: 52px; padding: 0 6px; font-size: 12px; }
+  .mark-row { gap: 8px; }
   .sessions, .inst-grid { grid-template-columns: 1fr; }
   .hide-sm { display: none; }
   .demo-logins { grid-template-columns: 1fr; }

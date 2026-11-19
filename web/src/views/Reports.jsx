@@ -81,7 +81,7 @@ export default function Reports() {
       ) : (
         <>
           <div className="kpis">
-            <Kpi label="Attendance" value={r.totals.pct == null ? '–' : `${r.totals.pct}%`} tone={r.totals.pct < 75 ? 'bad' : 'ok'} hint={`${r.totals.P} of ${r.totals.total} marks present`} />
+            <Kpi label="Attendance" value={r.totals.pct == null ? '–' : `${r.totals.pct}%`} tone={r.totals.pct < 75 ? 'bad' : 'ok'} hint={`${r.totals.P + r.totals.T} of ${r.totals.total} attended (${r.totals.T} late)`} />
             <Kpi label="WhatsApp alerts" value={r.alerts.sent} hint={`${r.alerts.replyRate ?? 0}% replied`} />
             <Kpi label="Avg reply time" value={r.alerts.avgReplyMin == null ? '–' : `${r.alerts.avgReplyMin}m`} hint="alert → parent reply" />
             <Kpi label="Informed after" value={r.alerts.avgMinToAlert == null ? '–' : `${r.alerts.avgMinToAlert}m`} hint={`${fmtDuration(r.alerts.avgMinBeforeClassEnd)} before class ends`} tone="ok" />
@@ -94,7 +94,8 @@ export default function Reports() {
               <h3>Daily attendance</h3>
               <div className="legend">
                 <span><i style={{ background: 'var(--green)' }} /> Present</span>
-                <span><i style={{ background: 'var(--amber)' }} /> Leave / late</span>
+                <span><i style={{ background: 'var(--amber)' }} /> Late</span>
+                <span><i style={{ background: 'var(--blue)' }} /> Leave</span>
                 <span><i style={{ background: 'var(--red)' }} /> Absent</span>
               </div>
             </div>
@@ -148,9 +149,10 @@ export default function Reports() {
                   <tr>
                     {th('name', 'Student')}
                     {th('batchName', 'Batch', 'hide-sm')}
-                    {th('P', 'P')}
-                    {th('L', 'L')}
-                    {th('A', 'A')}
+                    {th('P', 'Present')}
+                    {th('T', 'Late')}
+                    {th('L', 'Leave')}
+                    {th('A', 'Absent')}
                     {th('bunks', 'Bunks', 'hide-sm')}
                     {th('pct', 'Attendance')}
                   </tr>
@@ -161,6 +163,7 @@ export default function Reports() {
                       <td><a href={`#/students/${s.id}`} style={{ color: 'inherit', fontWeight: 600 }}>{s.name}</a></td>
                       <td className="small hide-sm">{s.batchName}</td>
                       <td className="num s-P">{s.P}</td>
+                      <td className="num s-T">{s.T}</td>
                       <td className="num s-L">{s.L}</td>
                       <td className="num s-A">{s.A}</td>
                       <td className="num hide-sm">{s.bunks}</td>

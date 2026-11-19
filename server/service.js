@@ -13,7 +13,7 @@ export const DEFAULT_ALERT_TEMPLATE =
 const DEFAULT_SETTINGS = {
   instituteName: 'My Coaching Institute',
   verifyAfterMinutes: '10', // Step 2: absent entries are verified this long after class starts
-  replyTimeoutMinutes: '3', // Step 6: no parent reply within this → staff call task
+  replyTimeoutMinutes: '10', // Step 6: no parent reply within this → staff call task
   alertTemplate: DEFAULT_ALERT_TEMPLATE,
   digestEnabled: '0', // end-of-day WhatsApp summary to the owner
   digestTime: '20:00',
@@ -35,7 +35,7 @@ export const AT_RISK = { minPct: 75, recentAbsences: 3, recentDays: 14 };
 /** Parent reply options sent as WhatsApp quick-reply buttons. */
 export const REPLY_OPTIONS = {
   LEAVE: { title: 'Leave', status: 'L', note: 'Leave (parent replied)' },
-  LATE: { title: 'Late 15 min', status: 'L', note: 'Late 15 min (parent replied)' },
+  LATE: { title: 'Late 15 min', status: 'T', note: 'Late 15 min (parent replied)' },
   // The case the product exists for: the parent thought the child was in class.
   // The student stays absent and staff get an urgent call task that never closes by itself.
   MISSING: {
@@ -51,15 +51,14 @@ const REPLY_KEYS = Object.keys(REPLY_OPTIONS).join('|');
 /** Outcomes staff can record after calling a parent. */
 export const TASK_OUTCOMES = {
   leave: { status: 'L', note: 'Leave (confirmed on call)' },
-  late: { status: 'L', note: 'Late (confirmed on call)' },
+  late: { status: 'T', note: 'Late (confirmed on call)' },
   present: { status: 'P', note: 'Present (confirmed on call)' },
   bunk: { status: 'A', note: 'Bunk, parent informed on call' },
   unreachable: { status: 'A', note: 'Parent unreachable' },
 };
 
-const STATUSES = ['P', 'A', 'L'];
-/** If the teacher is still marking at verify time, wait until they've stopped for this long. */
-export const MARKING_QUIET_MS = 90_000;
+const STATUSES = ['P', 'A', 'L', 'T'];
+export const STATUS_WORDS = { P: 'present', A: 'absent', L: 'on leave', T: 'late' };
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 export function normalizePhone(raw) {
@@ -347,7 +346,7 @@ export class AttendanceService {
   // -------------------------------------------------- Step 1: teacher marks
 
   async mark(sessionId, studentId, status, { source = 'teacher', note = null } = {}) {
-    if (!STATUSES.includes(status)) throw new HttpError(400, 'Status must be P, A or L');
+    if (!STATUSES.includes(status)) throw new HttpError(400, 'Status must be P (present), A (absent), L (leave) or T (late)');
     const session = this.getSessionRow(sessionId);
     const student = this.db
       .prepare('SELECT * FROM students WHERE id = ? AND batch_id = ? AND active = 1')
@@ -367,7 +366,7 @@ export class AttendanceService {
         // Marked absent after verification: alert right away.
         await this.sendAlert(session, student);
       } else {
-        this.closeTaskFor(session.id, student.id, `Marked ${status === 'P' ? 'present' : 'leave/late'} by ${source}`);
+        this.closeTaskFor(session.id, student.id, `Marked ${STATUS_WORDS[status]} by ${source}`);
       }
     }
     this.changed();
@@ -379,24 +378,42 @@ export class AttendanceService {
     for (const st of students) await this.mark(session.id, st.id, status);
   }
 
-  // ----------------------------- Step 2 + 3: verify, then alert the parents
-
-  async verify(sessionId) {
+  /**
+   * The teacher sends the list to the office. Marking is by exception: anyone the teacher
+   * didn't tap is present. Parents are only ever alerted for a class that was sent, so a
+   * forgotten or half-finished list can never message a parent by mistake.
+   */
+  async submit(sessionId) {
     const session = this.getSessionRow(sessionId);
     const at = this.nowIso();
-    const r = this.db.prepare('UPDATE sessions SET verified_at = ? WHERE id = ? AND verified_at IS NULL').run(at, session.id);
-    if (!r.changes) return; // already verified (possibly by a concurrent tick)
-
-    // Anyone the teacher did not mark has no attendance record, so treat them as absent.
     this.db
       .prepare(
         `INSERT INTO attendance (session_id, student_id, status, note, source, updated_at)
-         SELECT ?, s.id, 'A', 'Not marked by teacher', 'system', ?
+         SELECT ?, s.id, 'P', NULL, 'teacher', ?
            FROM students s
           WHERE s.batch_id = ? AND s.active = 1
             AND NOT EXISTS (SELECT 1 FROM attendance a WHERE a.session_id = ? AND a.student_id = s.id)`,
       )
       .run(session.id, at, session.batch_id, session.id);
+    this.db.prepare('UPDATE sessions SET submitted_at = COALESCE(submitted_at, ?) WHERE id = ?').run(at, session.id);
+    // Already past the verify time (teacher sent it late): alert now rather than on the next tick.
+    const { verifyAfterMinutes } = this.getSettings();
+    if (!session.verified_at && this.now() >= Date.parse(session.starts_at) + verifyAfterMinutes * 60_000) {
+      await this.verify(session.id);
+    }
+    this.changed();
+  }
+
+  // ----------------------------- Step 2 + 3: verify, then alert the parents
+
+  /** Alert the parents of students marked absent. Unmarked students are never treated as absent. */
+  async verify(sessionId) {
+    const session = this.getSessionRow(sessionId);
+    const at = this.nowIso();
+    const r = this.db
+      .prepare('UPDATE sessions SET verified_at = ?, submitted_at = COALESCE(submitted_at, ?) WHERE id = ? AND verified_at IS NULL')
+      .run(at, at, session.id);
+    if (!r.changes) return; // already verified (possibly by a concurrent tick)
 
     const absentees = this.db
       .prepare(
@@ -586,27 +603,13 @@ export class AttendanceService {
     const { verifyAfterMinutes, replyTimeoutMinutes } = this.getSettings();
     const now = this.now();
 
-    // Only sessions where the teacher has taken attendance. Otherwise a batch added after its
-    // start time (or a server started mid-day) would mark everyone absent and message every parent.
+    // Only classes the teacher has sent to the office. A class nobody sent is flagged to the
+    // front desk on the dashboard instead; its parents are never messaged automatically.
     const due = this.db
-      .prepare(
-        `SELECT * FROM sessions se WHERE se.verified_at IS NULL AND se.date = ?
-           AND EXISTS (SELECT 1 FROM attendance a WHERE a.session_id = se.id)`,
-      )
+      .prepare('SELECT * FROM sessions WHERE verified_at IS NULL AND submitted_at IS NOT NULL AND date = ?')
       .all(this.today());
     for (const s of due) {
-      if (now < Date.parse(s.starts_at) + verifyAfterMinutes * 60_000) continue;
-      // Don't verify while the teacher is still mid-way through marking: wait until everyone
-      // is marked, or until there have been no new marks for a short quiet period.
-      const { unmarked, lastMark } = this.db
-        .prepare(
-          `SELECT (SELECT COUNT(*) FROM students st WHERE st.batch_id = ? AND st.active = 1
-                    AND NOT EXISTS (SELECT 1 FROM attendance a WHERE a.session_id = ? AND a.student_id = st.id)) AS unmarked,
-                  (SELECT MAX(updated_at) FROM attendance WHERE session_id = ?) AS lastMark`,
-        )
-        .get(s.batch_id, s.id, s.id);
-      if (unmarked > 0 && now < Date.parse(lastMark) + MARKING_QUIET_MS) continue;
-      await this.verify(s.id);
+      if (now >= Date.parse(s.starts_at) + verifyAfterMinutes * 60_000) await this.verify(s.id);
     }
 
     let escalated = 0;
@@ -653,7 +656,7 @@ export class AttendanceService {
       )
       .all(s.id, s.id, s.batch_id);
 
-    const counts = { P: 0, A: 0, L: 0, unmarked: 0 };
+    const counts = { P: 0, A: 0, L: 0, T: 0, unmarked: 0 };
     const students = rows.map((r) => {
       counts[r.status ?? 'unmarked']++;
       return {
@@ -687,6 +690,7 @@ export class AttendanceService {
       batch: { id: s.batch_id, name: s.batch_name, startTime: s.start_time },
       startsAt: s.starts_at,
       verifyDueAt: new Date(Date.parse(s.starts_at) + verifyAfterMinutes * 60_000).toISOString(),
+      submittedAt: s.submitted_at,
       verifiedAt: s.verified_at,
       attendanceTaken: rows.some((r) => r.status),
       counts,
@@ -718,7 +722,7 @@ export class AttendanceService {
   getStats(date = this.today()) {
     const one = (sql, ...args) => this.db.prepare(sql).get(...args);
     const att = one(
-      `SELECT SUM(a.status = 'P') AS present, SUM(a.status = 'A') AS absent, SUM(a.status = 'L') AS leaveLate
+      `SELECT SUM(a.status = 'P') AS onTime, SUM(a.status = 'T') AS late, SUM(a.status = 'A') AS absent, SUM(a.status = 'L') AS leave
          FROM attendance a JOIN sessions se ON se.id = a.session_id WHERE se.date = ?`,
       date,
     );
@@ -733,9 +737,11 @@ export class AttendanceService {
     );
     const openTasks = one("SELECT COUNT(*) AS n FROM tasks WHERE status = 'open'").n;
     return {
-      present: att.present ?? 0,
+      present: (att.onTime ?? 0) + (att.late ?? 0), // late students did attend
+      late: att.late ?? 0,
+      leave: att.leave ?? 0,
       absent: att.absent ?? 0,
-      leaveLate: att.leaveLate ?? 0,
+      leaveLate: (att.leave ?? 0) + (att.late ?? 0),
       alertsSent: al.sent ?? 0,
       replied: al.replied ?? 0,
       awaitingReply: al.awaiting ?? 0,
@@ -844,6 +850,7 @@ export class AttendanceService {
                 COALESCE(SUM(x.status = 'P'), 0) AS P,
                 COALESCE(SUM(x.status = 'A'), 0) AS A,
                 COALESCE(SUM(x.status = 'L'), 0) AS L,
+                COALESCE(SUM(x.status = 'T'), 0) AS T,
                 COALESCE(SUM(x.status = 'A' AND x.note LIKE 'Bunk%'), 0) AS bunks,
                 COUNT(x.status) AS total,
                 COALESCE(SUM(x.status = 'A' AND x.date >= ?), 0) AS recentAbsences
@@ -858,7 +865,7 @@ export class AttendanceService {
       )
       .all(recentFrom, from, to, batchId, batchId, studentId, studentId);
     return rows.map((r) => {
-      const pct = r.total ? Math.round((r.P / r.total) * 100) : null;
+      const pct = r.total ? Math.round(((r.P + r.T) / r.total) * 100) : null; // late still attended
       const reasons = [];
       if (pct !== null && r.total >= 5 && pct < AT_RISK.minPct) reasons.push(`${pct}% attendance`);
       if (r.recentAbsences >= AT_RISK.recentAbsences) reasons.push(`${r.recentAbsences} absences in ${AT_RISK.recentDays} days`);
@@ -1002,7 +1009,7 @@ export class AttendanceService {
 
     const daily = this.db
       .prepare(
-        `SELECT se.date, SUM(a.status = 'P') AS P, SUM(a.status = 'A') AS A, SUM(a.status = 'L') AS L, COUNT(*) AS total
+        `SELECT se.date, SUM(a.status = 'P') AS P, SUM(a.status = 'A') AS A, SUM(a.status = 'L') AS L, SUM(a.status = 'T') AS T, COUNT(*) AS total
            FROM attendance a JOIN sessions se ON se.id = a.session_id
           WHERE se.date BETWEEN ? AND ? AND (? IS NULL OR se.batch_id = ?)
           GROUP BY se.date ORDER BY se.date`,
@@ -1018,8 +1025,9 @@ export class AttendanceService {
         P: row?.P ?? 0,
         A: row?.A ?? 0,
         L: row?.L ?? 0,
+        T: row?.T ?? 0,
         total: row?.total ?? 0,
-        pct: row?.total ? Math.round((row.P / row.total) * 100) : null,
+        pct: row?.total ? Math.round(((row.P + row.T) / row.total) * 100) : null,
         holiday: holidays.get(d) ?? null,
       });
     }
@@ -1028,7 +1036,7 @@ export class AttendanceService {
       .prepare(
         `SELECT b.id, b.name, b.start_time AS startTime, COUNT(DISTINCT se.id) AS sessions,
                 COALESCE(SUM(a.status = 'P'), 0) AS P, COALESCE(SUM(a.status = 'A'), 0) AS A,
-                COALESCE(SUM(a.status = 'L'), 0) AS L, COUNT(a.status) AS total
+                COALESCE(SUM(a.status = 'L'), 0) AS L, COALESCE(SUM(a.status = 'T'), 0) AS T, COUNT(a.status) AS total
            FROM batches b
            LEFT JOIN sessions se ON se.batch_id = b.id AND se.date BETWEEN ? AND ?
            LEFT JOIN attendance a ON a.session_id = se.id
@@ -1036,7 +1044,7 @@ export class AttendanceService {
           GROUP BY b.id ORDER BY b.start_time`,
       )
       .all(from, to, b, b)
-      .map((r) => ({ ...r, pct: r.total ? Math.round((r.P / r.total) * 100) : null }));
+      .map((r) => ({ ...r, pct: r.total ? Math.round(((r.P + r.T) / r.total) * 100) : null }));
 
     const al = this.db
       .prepare(
@@ -1061,13 +1069,13 @@ export class AttendanceService {
       .get(from, to, b, b);
 
     const students = this.studentStats({ from, to, batchId: b });
-    const totals = series.reduce((t, d) => ({ P: t.P + d.P, A: t.A + d.A, L: t.L + d.L, total: t.total + d.total }), { P: 0, A: 0, L: 0, total: 0 });
+    const totals = series.reduce((t, d) => ({ P: t.P + d.P, A: t.A + d.A, L: t.L + d.L, T: t.T + d.T, total: t.total + d.total }), { P: 0, A: 0, L: 0, T: 0, total: 0 });
     const round1 = (v) => (v == null ? null : Math.round(v * 10) / 10);
     return {
       from,
       to,
       batchId: b,
-      totals: { ...totals, pct: totals.total ? Math.round((totals.P / totals.total) * 100) : null },
+      totals: { ...totals, pct: totals.total ? Math.round(((totals.P + totals.T) / totals.total) * 100) : null },
       series,
       batches,
       alerts: {
@@ -1104,12 +1112,16 @@ export class AttendanceService {
            FROM attendance WHERE session_id = ? AND source = 'teacher'`,
       )
       .get(s.id);
-    if (marks.n) push(marks.last, 'mark', `Teacher marked ${marks.n} student${marks.n === 1 ? '' : 's'}`);
+    if (s.submitted_at) push(s.submitted_at, 'submit', 'Teacher sent attendance to the office');
+    else if (marks.n) push(marks.last, 'mark', `Teacher marked ${marks.n} student${marks.n === 1 ? '' : 's'} (not sent yet)`);
     if (s.verified_at) {
       const c = this.db
-        .prepare(`SELECT SUM(status = 'P') AS P, SUM(status = 'A') AS A, SUM(status = 'L') AS L FROM attendance WHERE session_id = ?`)
+        .prepare(
+          `SELECT SUM(status = 'P') AS P, SUM(status = 'T') AS T, SUM(status = 'A') AS A, SUM(status = 'L') AS L
+             FROM attendance WHERE session_id = ?`,
+        )
         .get(s.id);
-      push(s.verified_at, 'verify', `Verified: ${c.P ?? 0} present, ${c.A ?? 0} absent, ${c.L ?? 0} leave/late`);
+      push(s.verified_at, 'verify', `Verified: ${(c.P ?? 0) + (c.T ?? 0)} present (${c.T ?? 0} late), ${c.A ?? 0} absent, ${c.L ?? 0} on leave`);
     }
     const alerts = this.db
       .prepare(
@@ -1155,11 +1167,18 @@ export class AttendanceService {
       .get(date);
     const lines = [
       `📋 ${name}: summary for ${label}`,
-      `✅ Present ${st.present} · ❌ Absent ${st.absent} · 🕒 Leave/late ${st.leaveLate}`,
+      `✅ Present ${st.present} (${st.late} late) · ❌ Absent ${st.absent} · 🕒 Leave ${st.leave}`,
       `💬 WhatsApp alerts ${st.alertsSent} (${st.replied} replied)`,
       `📞 Calls ${calls.done} done${calls.open ? `, ${calls.open} pending` : ''}${calls.bunks ? ` · ${calls.bunks} bunk${calls.bunks > 1 ? 's' : ''} caught` : ''}`,
     ];
     if (st.avgMinutesToAlert != null) lines.push(`⏱ Parents informed ${st.avgMinutesToAlert} min after class start`);
+    const notSent = this.db
+      .prepare(
+        `SELECT b.name FROM sessions se JOIN batches b ON b.id = se.batch_id
+          WHERE se.date = ? AND se.submitted_at IS NULL AND se.starts_at <= ? ORDER BY se.starts_at`,
+      )
+      .all(date, this.nowIso());
+    if (notSent.length) lines.push(`📝 Attendance not sent by teacher: ${notSent.map((r) => r.name).join(', ')}`);
     if (risk.length) lines.push(`⚠️ Needs attention: ${risk.map((r) => `${r.name} (${r.batchName})`).join(', ')}`);
     return lines.join('\n');
   }

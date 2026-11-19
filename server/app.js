@@ -257,9 +257,11 @@ export function createApp({ platform, hub, demo = false, setupToken = null, real
     await req.svc.markAll(s.id, req.body?.status ?? 'P');
     res.json(sessionView(req, s.id));
   });
-  inst.post('/sessions/:id/verify', MGMT, async (req, res) => {
-    await req.svc.verify(Number(req.params.id));
-    res.json(sessionView(req, Number(req.params.id)));
+  // Teacher (or front desk on their behalf) sends the list to the office.
+  inst.post('/sessions/:id/submit', async (req, res) => {
+    const s = sessionFor(req);
+    await req.svc.submit(s.id);
+    res.json(sessionView(req, s.id));
   });
   inst.post('/sessions/:id/start-now', MGMT, (req, res) => {
     req.svc.startNow(Number(req.params.id));
@@ -303,8 +305,8 @@ export function createApp({ platform, hub, demo = false, setupToken = null, real
   inst.get('/reports', MGMT, (req, res) => res.json(req.svc.getReport({ from: req.query.from, to: req.query.to, batchId: req.query.batchId || null })));
   inst.get('/reports.csv', MGMT, (req, res) => {
     const r = req.svc.getReport({ from: req.query.from, to: req.query.to, batchId: req.query.batchId || null });
-    const head = ['Student', 'Batch', 'Parent', 'Parent WhatsApp', 'Present', 'Absent', 'Leave/Late', 'Bunks', 'Classes', 'Attendance %', 'At risk'];
-    const lines = [head, ...r.students.map((s) => [s.name, s.batchName, s.parentName, `+${s.parentPhone}`, s.P, s.A, s.L, s.bunks, s.total, s.pct ?? '', s.riskReasons.join('; ')])];
+    const head = ['Student', 'Batch', 'Parent', 'Parent WhatsApp', 'Present', 'Late', 'Leave', 'Absent', 'Bunks', 'Classes', 'Attendance %', 'At risk'];
+    const lines = [head, ...r.students.map((s) => [s.name, s.batchName, s.parentName, `+${s.parentPhone}`, s.P, s.T, s.L, s.A, s.bunks, s.total, s.pct ?? '', s.riskReasons.join('; ')])];
     res.set('Content-Type', 'text/csv; charset=utf-8');
     res.set('Content-Disposition', `attachment; filename="attendance-${req.params.slug}-${r.from}-to-${r.to}.csv"`);
     res.send(`﻿${lines.map((l) => l.map(csvCell).join(',')).join('\r\n')}`);

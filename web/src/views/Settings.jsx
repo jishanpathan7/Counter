@@ -48,7 +48,7 @@ function General() {
           <label className="field">
             Verify absentees after (minutes)
             <input className="input" type="number" min="0" max="240" step="any" value={f.verifyAfterMinutes} onChange={set('verifyAfterMinutes')} />
-            <span className="hint">Step 2: counted from class start time</span>
+            <span className="hint">From class start, once the teacher has sent the list. Unsent classes never alert parents.</span>
           </label>
           <label className="field">
             Call task if no reply in (minutes)

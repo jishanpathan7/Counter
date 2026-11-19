@@ -1,5 +1,16 @@
 import { DatabaseSync } from 'node:sqlite';
 
+// P present · A absent · L leave · T late (arrived late, or parent says they're on the way)
+const attendanceTable = (name) => `CREATE TABLE IF NOT EXISTS ${name} (
+  session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  status     TEXT NOT NULL CHECK (status IN ('P', 'A', 'L', 'T')),
+  note       TEXT,
+  source     TEXT NOT NULL,                       -- teacher | system | parent | staff
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (session_id, student_id)
+);`;
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,
@@ -29,19 +40,12 @@ CREATE TABLE IF NOT EXISTS sessions (
   batch_id    INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
   date        TEXT NOT NULL,
   starts_at   TEXT NOT NULL,
+  submitted_at TEXT,                             -- the teacher sent the list to the office
   verified_at TEXT,
   UNIQUE (batch_id, date)
 );
 
-CREATE TABLE IF NOT EXISTS attendance (
-  session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
-  status     TEXT NOT NULL CHECK (status IN ('P', 'A', 'L')),
-  note       TEXT,
-  source     TEXT NOT NULL,                       -- teacher | system | parent | staff
-  updated_at TEXT NOT NULL,
-  PRIMARY KEY (session_id, student_id)
-);
+${attendanceTable('attendance')}
 
 -- One WhatsApp alert per absent student per session.
 CREATE TABLE IF NOT EXISTS alerts (
@@ -111,5 +115,26 @@ function migrate(db) {
   }
   if (!hasColumn('tasks', 'urgent')) {
     db.exec('ALTER TABLE tasks ADD COLUMN urgent INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!hasColumn('sessions', 'submitted_at')) {
+    db.exec('ALTER TABLE sessions ADD COLUMN submitted_at TEXT');
+    db.exec('UPDATE sessions SET submitted_at = verified_at WHERE verified_at IS NOT NULL');
+  }
+  // Older databases only allowed P/A/L: rebuild the table to add T (late) and move late records over.
+  const att = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'attendance'").get()?.sql ?? '';
+  if (!att.includes("'T'")) {
+    db.exec('BEGIN');
+    try {
+      db.exec(attendanceTable('attendance_v2'));
+      db.exec(`INSERT INTO attendance_v2 SELECT session_id, student_id,
+                 CASE WHEN status = 'L' AND note LIKE 'Late%' THEN 'T' ELSE status END, note, source, updated_at
+               FROM attendance`);
+      db.exec('DROP TABLE attendance');
+      db.exec('ALTER TABLE attendance_v2 RENAME TO attendance');
+      db.exec('COMMIT');
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    }
   }
 }

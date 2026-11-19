@@ -99,7 +99,7 @@ function Profile({ id, batches, onClose }) {
           </div>
 
           <section className="card">
-            <div className="card-head"><h3>Last 90 days</h3><span className="muted small">{p.stats90.P} present · {p.stats90.L} leave/late · {p.stats90.A} absent</span></div>
+            <div className="card-head"><h3>Last 90 days</h3><span className="muted small">{p.stats90.P} present · {p.stats90.T} late · {p.stats90.L} leave · {p.stats90.A} absent</span></div>
             <Heatmap from={p.from} to={p.today} days={p.days} holidays={p.holidays} />
           </section>
 

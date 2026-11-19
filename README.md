@@ -8,14 +8,16 @@ parents who don't reply land on the front desk's call list.
 
 ## The flow
 
-1. **The teacher takes attendance** on their phone (P / A / L).
-2. **Absentees are verified automatically** 10 minutes after class starts.
+1. **The teacher takes attendance** on their phone: everyone is present unless they tap **Absent**,
+   **Late** or **Leave**, then they press **Send to office**.
+2. **Absentees are verified automatically** 10 minutes after class starts (or as soon as a late list
+   is sent).
 3. **The parent gets a WhatsApp message** with three buttons: **Leave**, **Late 15 min** and
    **Mujhe call karein** ("call me", for a parent who thought the child was in class).
 4. **The parent replies**, by tapping a button or typing something like "aaj chutti hai". A reply
    such as "ghar se nikal gaya tha" or "why absent?" is treated as an emergency, never as leave.
-5. **The record updates itself**: absent becomes leave/late, with the reason.
-6. **No reply in 3 minutes?** It becomes a call task. Staff call and log the outcome: leave, late,
+5. **The record updates itself**: absent becomes leave or late, with the reason.
+6. **No reply in 10 minutes?** It becomes a call task. Staff call and log the outcome: leave, late,
    present, bunk or unreachable.
 
 ## What's in the app
@@ -47,10 +49,11 @@ owner, front desk, teacher), a first-run setup wizard, dark mode, and installabi
 
 ### Safeguards
 
-- Parents are never messaged for a class where no attendance was taken. This protects against a
-  new install, or a batch added after class time, messaging a whole batch.
-- If the teacher is still marking at verify time, verification waits until everyone is marked or
-  they have paused for 90 seconds.
+- Parents are only messaged for a class the teacher has **sent to the office**. A forgotten or
+  half-finished list never alerts anyone; instead the dashboard and the owner's daily summary flag
+  "not sent by teacher", and the front desk can send it on the teacher's behalf.
+- Students the teacher didn't tap count as present, never absent.
+- Late and Leave are separate statuses. Late students count as attended in attendance percentages.
 - Each student gets at most one alert per class, and a parent can only answer for their own child.
 - "Mujhe call karein", or a reply saying the child left home, creates an **urgent** call task at the
   top of the list that never closes by itself.
@@ -85,7 +88,7 @@ Today's **Class 10 · Batch B** is left open, so you can try the live flow at an
 
 1. Log in as the owner. In Settings → General, set both timers to `0.2` minutes.
 2. On the Dashboard, press **Start class now** on Batch B.
-3. Mark a couple of students absent (on your phone, log in as the teacher).
+3. On your phone, log in as the teacher, tap a couple of students **Absent** and press **Send to office**.
 4. Within seconds parents are alerted. Reply as one parent on the **WhatsApp** tab, leave the other
    one silent, and watch the call task appear.
 
@@ -94,7 +97,7 @@ Production:
 ```bash
 npm run build
 SESSION_SECRET=$(openssl rand -hex 32) npm start   # serves API + app on PORT
-npm test                                           # 26 server and API tests
+npm test                                           # 27 server and API tests
 ```
 
 Outside `npm run dev`, the server refuses to start without a `SESSION_SECRET` of at least 32

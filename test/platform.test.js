@@ -159,7 +159,8 @@ test('simulator reply, CSV export, WhatsApp settings never leak secrets', async 
   await owner.call('POST', `/api/i/bright-future/sessions/${s.id}/mark-all`, { status: 'P' });
   const rohan = s.students.find((x) => x.name.startsWith('Yash'));
   await owner.call('POST', `/api/i/bright-future/sessions/${s.id}/mark`, { studentId: rohan.id, status: 'A' });
-  await owner.call('POST', `/api/i/bright-future/sessions/${s.id}/verify`);
+  await owner.call('POST', `/api/i/bright-future/sessions/${s.id}/submit`);
+  await svc.verify(s.id); // the 6 PM class isn't due yet at 5:30; verify now for the test
   const msgs = (await owner.call('GET', `/api/i/bright-future/messages?phone=${rohan.parentPhone}`)).body;
   const btn = msgs.at(-1).buttons[1];
   const reply = await owner.call('POST', '/api/i/bright-future/simulator/reply', { phone: rohan.parentPhone, payload: btn.id, text: btn.title });
@@ -218,7 +219,8 @@ test('webhooks are rejected unless signed with the app secret; the unscoped rout
   await owner.call('POST', `/api/i/bright-future/sessions/${s.id}/mark-all`, { status: 'P' });
   const yash = s.students.find((x) => x.name.startsWith('Yash'));
   await owner.call('POST', `/api/i/bright-future/sessions/${s.id}/mark`, { studentId: yash.id, status: 'A' });
-  await owner.call('POST', `/api/i/bright-future/sessions/${s.id}/verify`);
+  await owner.call('POST', `/api/i/bright-future/sessions/${s.id}/submit`);
+  await svc.verify(s.id); // the 6 PM class isn't due yet at 5:30; verify now for the test
 
   const body = JSON.stringify({ entry: [{ changes: [{ value: { messages: [{ from: yash.parentPhone, type: 'text', text: { body: 'chutti' } }] } }] }] });
   const post = (url, headers = {}) => fetch(`${base}${url}`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body });
