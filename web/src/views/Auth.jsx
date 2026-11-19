@@ -89,9 +89,9 @@ export function Login({ demo, onDone }) {
   );
 }
 
-export function SetupWizard({ onDone }) {
+export function SetupWizard({ onDone, setupCodeRequired }) {
   const [step, setStep] = useState(0);
-  const [f, setF] = useState({ name: '', phone: '', pin: '', pin2: '', instituteName: '', city: '' });
+  const [f, setF] = useState({ name: '', phone: '', pin: '', pin2: '', instituteName: '', city: '', setupCode: '' });
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
@@ -108,7 +108,7 @@ export function SetupWizard({ onDone }) {
     setBusy(true);
     setError('');
     try {
-      const r = await api.post('/setup', { name: f.name, phone: f.phone, pin: f.pin, instituteName: f.instituteName, city: f.city });
+      const r = await api.post('/setup', { name: f.name, phone: f.phone, pin: f.pin, instituteName: f.instituteName, city: f.city, setupCode: f.setupCode });
       await onDone();
       navigate(`/i/${r.institute.slug}/#/settings`);
     } catch (err) {
@@ -149,6 +149,13 @@ export function SetupWizard({ onDone }) {
               </div>
               <label className="field">Institute name<input className="input" value={f.instituteName} onChange={set('instituteName')} required autoFocus placeholder="e.g. Bright Future Classes" /></label>
               <label className="field">City<input className="input" value={f.city} onChange={set('city')} placeholder="Optional" /></label>
+              {setupCodeRequired && (
+                <label className="field">
+                  Setup code
+                  <input className="input" value={f.setupCode} onChange={set('setupCode')} required autoComplete="off" />
+                  <span className="hint">Printed in the server log when it starts, or the SETUP_TOKEN you configured.</span>
+                </label>
+              )}
               {error && <p className="error-text small">{error}</p>}
               <div className="row">
                 <button type="button" className="btn ghost" onClick={() => setStep(0)}>Back</button>
@@ -156,7 +163,7 @@ export function SetupWizard({ onDone }) {
               </div>
             </form>
           )}
-          <div className="row muted small"><BrandMark /> Your data stays on your own server.</div>
+          <div className="row muted small"><BrandMark /> You can add more institutes and people later.</div>
         </div>
       </section>
     </div>

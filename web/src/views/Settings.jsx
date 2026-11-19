@@ -202,7 +202,7 @@ function MemberForm({ initial, batches, onSave, onCancel, isNew }) {
   return (
     <form className="stack" onSubmit={(e) => { e.preventDefault(); onSave(f); }}>
       <div className="grid2">
-        <label className="field">Name<input className="input" value={f.name} onChange={set('name')} required autoFocus /></label>
+        <label className="field">Name<input className="input" value={f.name} onChange={set('name')} required autoFocus disabled={!isNew && f.sharedAccount} /></label>
         <label className="field">Mobile number<input className="input" inputMode="tel" value={f.phone} onChange={set('phone')} required disabled={!isNew} /></label>
       </div>
       <div className="field">
@@ -227,11 +227,15 @@ function MemberForm({ initial, batches, onSave, onCancel, isNew }) {
           <span className="hint">None selected = all batches</span>
         </div>
       )}
-      <label className="field">
-        {isNew ? 'PIN for their first login' : 'Reset PIN'}
-        <input className="input" inputMode="numeric" maxLength={8} value={f.pin} onChange={(e) => setF({ ...f, pin: e.target.value.replace(/\D/g, '') })} required={isNew} placeholder={isNew ? '4–8 digits' : 'Leave blank to keep'} />
-        {isNew && <span className="hint">If they already have an account (another institute), their existing PIN stays.</span>}
-      </label>
+      {!isNew && f.sharedAccount ? (
+        <p className="muted small">This person also uses another institute, so only they can change their name or PIN (from My account).</p>
+      ) : (
+        <label className="field">
+          {isNew ? 'PIN for their first login' : 'Reset PIN'}
+          <input className="input" inputMode="numeric" maxLength={8} value={f.pin} onChange={(e) => setF({ ...f, pin: e.target.value.replace(/\D/g, '') })} required={isNew} placeholder={isNew ? '4–8 digits' : 'Leave blank to keep'} />
+          {isNew && <span className="hint">If they already have an account with another institute, they keep their own name and PIN.</span>}
+        </label>
+      )}
       <div className="row" style={{ justifyContent: 'flex-end' }}>
         <button type="button" className="btn ghost" onClick={onCancel}>Cancel</button>
         <button className="btn primary">{isNew ? 'Add to team' : 'Save'}</button>
@@ -353,7 +357,7 @@ function MessageEditor() {
           <div className="phone-body" style={{ minHeight: 220 }}>
             <div className="bubble-wrap out">
               <div className="bubble out"><div className="bubble-from">{data.instituteName}</div>{preview}<div className="bubble-time">4:10 PM</div></div>
-              <div className="bubble-buttons"><button disabled>↩ Leave</button><button disabled>↩ Late 15 min</button></div>
+              <div className="bubble-buttons"><button disabled>↩ Leave</button><button disabled>↩ Late 15 min</button><button disabled>↩ Mujhe call karein</button></div>
             </div>
           </div>
         </div>
@@ -415,7 +419,7 @@ function WhatsAppSettings() {
           </div>
           <div className="grid2">
             <label className="field">Verify token<input className="input" value={f.verifyToken} onChange={(e) => setF({ ...f, verifyToken: e.target.value })} placeholder="any phrase; paste the same in Meta" /></label>
-            <label className="field">App secret<input className="input" type="password" value={f.appSecret} onChange={(e) => setF({ ...f, appSecret: e.target.value })} placeholder={data.appSecret ? '•••••• saved' : 'to verify webhook signatures'} autoComplete="off" /></label>
+            <label className="field">App secret<input className="input" type="password" value={f.appSecret} onChange={(e) => setF({ ...f, appSecret: e.target.value })} placeholder={data.appSecret ? '•••••• saved' : 'required: replies are rejected without it'} autoComplete="off" /><span className="hint">From Meta App settings → Basic. Parent replies are only accepted when signed with it.</span></label>
           </div>
           <div className="row">
             <button className="btn primary">Save</button>

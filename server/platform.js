@@ -322,13 +322,25 @@ export class Platform {
     const i = this.institute(slug);
     return this.db
       .prepare(
-        `SELECT u.id, u.name, u.phone, u.last_login_at AS lastLoginAt, m.role, m.batch_ids
+        `SELECT u.id, u.name, u.phone, u.last_login_at AS lastLoginAt, m.role, m.batch_ids,
+                (u.is_agency = 1 OR (SELECT COUNT(*) FROM memberships m2 WHERE m2.user_id = u.id) > 1) AS sharedAccount
            FROM memberships m JOIN users u ON u.id = m.user_id
           WHERE m.institute_id = ? AND u.active = 1
           ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'staff' THEN 1 ELSE 2 END, u.name`,
       )
       .all(i.id)
-      .map(({ batch_ids, ...r }) => ({ ...r, batchIds: JSON.parse(batch_ids) }));
+      .map(({ batch_ids, ...r }) => ({ ...r, sharedAccount: Boolean(r.sharedAccount), batchIds: JSON.parse(batch_ids) }));
+  }
+
+  /**
+   * An institute may only change the name or PIN of accounts that belong to it alone.
+   * Anyone who also works at another institute, or runs the platform, manages their own.
+   */
+  ownsAccount(userId, instituteId) {
+    const u = this.db.prepare('SELECT is_agency FROM users WHERE id = ?').get(userId);
+    if (!u || u.is_agency) return false;
+    const rows = this.db.prepare('SELECT institute_id FROM memberships WHERE user_id = ?').all(userId);
+    return rows.length === 1 && rows[0].institute_id === instituteId;
   }
 
   addMember(slug, { name, phone, pin, role, batchIds = [] }) {
@@ -336,6 +348,9 @@ export class Platform {
     if (!ROLES.includes(role)) throw new HttpError(400, 'Role must be owner, staff or teacher');
     const p = requirePhone(phone);
     let u = this.db.prepare('SELECT * FROM users WHERE phone = ?').get(p);
+    if (u?.is_agency) throw new HttpError(409, "This number can't be added to a team");
+    // An existing account (someone who also works at another institute) joins as-is:
+    // the name and PIN given here are ignored, so nobody can take over that account.
     if (!u) u = this.createUser({ name, phone: p, pin });
     if (this.db.prepare('SELECT 1 FROM memberships WHERE user_id = ? AND institute_id = ?').get(u.id, i.id)) {
       throw new HttpError(409, `${u.name} is already in the team`);
@@ -356,6 +371,10 @@ export class Platform {
     if (m.role === 'owner' && role !== 'owner') this.assertAnotherOwner(i.id, userId);
     const batchIds = patch.batchIds !== undefined ? this.cleanBatchIds(slug, patch.batchIds) : JSON.parse(m.batch_ids);
     this.db.prepare('UPDATE memberships SET role = ?, batch_ids = ? WHERE user_id = ? AND institute_id = ?').run(role, JSON.stringify(batchIds), userId, i.id);
+    const changesAccount = (patch.name !== undefined && patch.name !== this.getUser(userId)?.name) || Boolean(patch.pin);
+    if (changesAccount && !this.ownsAccount(userId, i.id)) {
+      throw new HttpError(403, 'This person also uses another institute, so only they can change their name or PIN (from My account).');
+    }
     if (patch.name !== undefined) this.db.prepare('UPDATE users SET name = ? WHERE id = ?').run(requireName(patch.name), userId);
     if (patch.pin) this.setPin(userId, patch.pin);
     this.onChange(slug);
@@ -368,7 +387,9 @@ export class Platform {
     if (!m) throw new HttpError(404, 'Team member not found');
     if (m.role === 'owner') this.assertAnotherOwner(i.id, userId);
     this.db.prepare('DELETE FROM memberships WHERE user_id = ? AND institute_id = ?').run(userId, i.id);
-    this.signOutEverywhere(userId);
+    // Sign them out only if this was their last institute; never disrupt their other workplaces.
+    const remaining = this.db.prepare('SELECT COUNT(*) AS n FROM memberships WHERE user_id = ?').get(userId).n;
+    if (!remaining && !this.getUser(userId)?.is_agency) this.signOutEverywhere(userId);
     this.onChange(slug);
   }
 

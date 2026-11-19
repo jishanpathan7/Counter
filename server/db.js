@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   created_at TEXT NOT NULL,
   done_at    TEXT,
   outcome    TEXT,
+  urgent     INTEGER NOT NULL DEFAULT 0,          -- parent says they don't know where the child is
   UNIQUE (alert_id)
 );
 
@@ -107,5 +108,8 @@ function migrate(db) {
   const hasColumn = (table, col) => db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col);
   if (!hasColumn('batches', 'duration_minutes')) {
     db.exec('ALTER TABLE batches ADD COLUMN duration_minutes INTEGER NOT NULL DEFAULT 120');
+  }
+  if (!hasColumn('tasks', 'urgent')) {
+    db.exec('ALTER TABLE tasks ADD COLUMN urgent INTEGER NOT NULL DEFAULT 0');
   }
 }

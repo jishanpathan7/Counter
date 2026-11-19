@@ -10,8 +10,10 @@ parents who don't reply land on the front desk's call list.
 
 1. **The teacher takes attendance** on their phone (P / A / L).
 2. **Absentees are verified automatically** 10 minutes after class starts.
-3. **The parent gets a WhatsApp message** with two buttons: **Leave** and **Late 15 min**.
-4. **The parent replies**, by tapping a button or typing something like "aaj chutti hai".
+3. **The parent gets a WhatsApp message** with three buttons: **Leave**, **Late 15 min** and
+   **Mujhe call karein** ("call me", for a parent who thought the child was in class).
+4. **The parent replies**, by tapping a button or typing something like "aaj chutti hai". A reply
+   such as "ghar se nikal gaya tha" or "why absent?" is treated as an emergency, never as leave.
 5. **The record updates itself**: absent becomes leave/late, with the reason.
 6. **No reply in 3 minutes?** It becomes a call task. Staff call and log the outcome: leave, late,
    present, bunk or unreachable.
@@ -50,6 +52,12 @@ owner, front desk, teacher), a first-run setup wizard, dark mode, and installabi
 - If the teacher is still marking at verify time, verification waits until everyone is marked or
   they have paused for 90 seconds.
 - Each student gets at most one alert per class, and a parent can only answer for their own child.
+- "Mujhe call karein", or a reply saying the child left home, creates an **urgent** call task at the
+  top of the list that never closes by itself.
+- Once staff log a call outcome, later messages or old buttons can't overwrite it.
+- Owners can only change the name or PIN of people who belong to their institute alone; the agency
+  admin can't be added to an institute's team.
+- WhatsApp webhooks are rejected unless they are signed with the institute's app secret.
 - Failed WhatsApp sends go straight to the call list. Holidays send nothing.
 - Each institute has its own database file, so their data never mixes. WhatsApp tokens never
   reach the browser.
@@ -84,19 +92,22 @@ Today's **Class 10 · Batch B** is left open, so you can try the live flow at an
 Production:
 
 ```bash
-SEED_DEMO=false npm run build && SEED_DEMO=false npm start   # serves API + app on PORT
-npm test                                                     # 20 server and API tests
+npm run build
+SESSION_SECRET=$(openssl rand -hex 32) npm start   # serves API + app on PORT
+npm test                                           # 26 server and API tests
 ```
 
-With `SEED_DEMO=false`, a fresh install opens a setup wizard where you create your account and first
-institute. Data lives in `DATA_DIR` (default `data/`): `platform.db` holds users and institutes, and
+Outside `npm run dev`, the server refuses to start without a `SESSION_SECRET` of at least 32
+characters, and it never loads demo data unless you set `SEED_DEMO=true`. A fresh install opens a
+setup wizard where you create your account and first institute; it asks for a **setup code**, which
+is printed in the server log at startup (or set your own with `SETUP_TOKEN`). Data lives in `DATA_DIR` (default `data/`): `platform.db` holds users and institutes, and
 `institutes/<name>.db` holds each institute's data. Back up that folder.
 
 ## Deploying on Vercel (demo)
 
 The repo deploys to Vercel as-is: `vercel.json` builds the app into `dist/` and runs the API from
-`api/index.js` as one serverless function. Set a `SESSION_SECRET` environment variable (any long
-random string) so logins work across function instances.
+`api/index.js` as one serverless function. Set `SESSION_SECRET` (at least 32 random characters) and,
+for the demo, `SEED_DEMO=true`. Without demo data, set `SETUP_TOKEN` to enable first-run setup.
 
 On Vercel the app runs in **demo mode**: data lives in the function's temporary folder and is reset
 whenever Vercel starts a fresh instance, the alert timers run as requests come in, and screens
@@ -112,13 +123,14 @@ Each institute connects its own WhatsApp Business number in **Settings → Whats
 2. Create a message template, for example `attendance_alert`, category *Utility*:
    - Body: `Namaste {{1}}, aaj ki {{2}} class ({{3}}) mein {{4}} ki attendance record nahi hui. Please confirm.`
      (`{{1}}` parent, `{{2}}` batch, `{{3}}` time, `{{4}}` student)
-   - Two **Quick reply** buttons, in this order: `Leave`, `Late 15 min`.
+   - Three **Quick reply** buttons, in this order: `Leave`, `Late 15 min`, `Mujhe call karein`.
 
    Once it's approved, enter its name and language. Without an approved template, WhatsApp only
    delivers alerts to parents who messaged you in the last 24 hours.
 3. Webhook: paste the **callback URL** shown in the form (`/webhooks/whatsapp/<institute>`) into
-   Meta along with your verify token, subscribe to **messages**, and add the app secret so incoming
-   webhooks are signature-checked.
+   Meta along with your verify token, subscribe to **messages**, and enter the app secret (Meta App
+   settings → Basic). It is required: unsigned webhooks are rejected, so replies only arrive once
+   it is set.
 
 ## Code layout
 

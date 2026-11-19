@@ -8,7 +8,7 @@
     "node": ">=22.13"
   },
   "scripts": {
-    "dev": "concurrently -k -n api,web -c green,cyan \"node --watch --no-warnings=ExperimentalWarning server/index.js\" \"vite\"",
+    "dev": "concurrently -k -n api,web -c green,cyan \"node --watch --no-warnings=ExperimentalWarning server/index.js --dev\" \"vite\"",
     "build": "vite build",
     "start": "node --no-warnings=ExperimentalWarning server/index.js",
     "test": "node --test --no-warnings=ExperimentalWarning test/*.test.js"

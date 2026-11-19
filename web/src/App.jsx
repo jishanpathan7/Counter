@@ -225,7 +225,7 @@ export default function App() {
 
   if (failed) return <div className="center error-text">Can't reach the server. Is it running?</div>;
   if (!me) return <div className="center muted">Loading…</div>;
-  if (me.needsSetup) return <SetupWizard onDone={refreshMe} />;
+  if (me.needsSetup) return <SetupWizard onDone={refreshMe} setupCodeRequired={me.setupCodeRequired} />;
   if (!me.user) return <Login demo={me.demo} onDone={refreshMe} />;
   if (instMatch) return <InstituteApp key={instMatch[1]} slug={instMatch[1]} me={me} logout={logout} theme={theme} />;
   if (me.user.isAgency) {

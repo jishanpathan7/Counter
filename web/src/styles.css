@@ -361,7 +361,8 @@ svg.icon { width: 18px; height: 18px; flex: none; stroke: currentColor; fill: no
 .teacher-foot { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; border-top: 1px solid var(--line); padding-top: 14px; }
 
 /* ============================================================ tasks */
-.task { display: flex; flex-direction: column; gap: 12px; border-left: 4px solid var(--red); }
+.task { display: flex; flex-direction: column; gap: 12px; border-left: 4px solid var(--amber); }
+.task.urgent { border-left-color: var(--red); background: var(--red-soft); }
 .task-head { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
 .task-contact { display: flex; flex-direction: column; gap: 6px; align-items: stretch; }
 .outcomes { display: flex; gap: 8px; flex-wrap: wrap; }

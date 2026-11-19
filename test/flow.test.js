@@ -82,7 +82,7 @@ test('the whole reel flow: mark, verify, alert, reply, auto-update, escalate, ca
   const rohanMsg = t.sent.find((m) => m.to === '919000000003');
   assert.match(rohanMsg.text, /Rohan ki attendance record nahi hui/);
   assert.match(rohanMsg.text, /4:00 PM/);
-  assert.deepEqual(rohanMsg.buttons.map((b) => b.title), ['Leave', 'Late 15 min']);
+  assert.deepEqual(rohanMsg.buttons.map((b) => b.title), ['Leave', 'Late 15 min', 'Mujhe call karein']);
   assert.deepEqual(rohanMsg.params, ['Rohan parent', 'Batch B', '4:00 PM', 'Rohan']);
 
   // A second tick must not send duplicate alerts.
@@ -310,4 +310,60 @@ test('student profile and at-risk detection', async () => {
   assert.equal(p.alerts.length, 3);
   const dir = service.getStudentDirectory();
   assert.equal(dir.find((s) => s.name === 'Aarav').atRisk, false);
+});
+
+test('a parent who says the child left home gets an urgent call, never "leave"', async () => {
+  const t = setup();
+  await t.service.markAll(t.session.id, 'P');
+  await t.service.mark(t.session.id, t.ids.Rohan, 'A');
+  await t.service.mark(t.session.id, t.ids.Meera, 'A');
+  await t.service.verify(t.session.id);
+
+  // Free text: the reel's emergency, in the parent's own words.
+  const r = await t.service.handleReply({ phone: '9000000003', text: 'absent kaise? ghar se toh nikal gaya tha' });
+  assert.equal(r.choice, 'MISSING');
+  assert.equal(t.student('Rohan').status, 'A');
+  assert.equal(t.student('Rohan').alert.replyKey, 'MISSING');
+
+  // Button: same outcome.
+  const meeraBtn = t.sent.find((m) => m.to === '919000000004').buttons.find((b) => b.title === 'Mujhe call karein');
+  await t.service.handleReply({ phone: '9000000004', payload: meeraBtn.id, text: meeraBtn.title });
+
+  const tasks = t.service.listTasks('open');
+  assert.equal(tasks.length, 2);
+  assert.ok(tasks.every((x) => x.urgent === 1), 'both calls are urgent');
+  assert.equal(t.sent.at(-1).text, 'Thank you. Our staff will call you right away.');
+
+  // Urgent tasks never close by the timeout; they stay until staff log the call.
+  t.advance(30 * 60_000);
+  await t.service.tick();
+  assert.equal(t.service.listTasks('open').length, 2);
+  assert.match(t.service.getTimeline(t.session.id).map((e) => e.text).join('|'), /doesn't know where Rohan is/);
+});
+
+test('a later message cannot overwrite what staff logged after a call', async () => {
+  const t = setup();
+  await t.service.markAll(t.session.id, 'P');
+  await t.service.mark(t.session.id, t.ids.Rohan, 'A');
+  await t.service.verify(t.session.id);
+  t.advance(4 * 60_000);
+  await t.service.tick();
+  const [task] = t.service.listTasks('open');
+  t.service.completeTask(task.id, { outcome: 'bunk' });
+
+  const r = await t.service.handleReply({ phone: '9000000003', text: 'aaj chutti hai' });
+  assert.equal(r.matched, false);
+  assert.equal(t.student('Rohan').status, 'A');
+  assert.match(t.student('Rohan').note, /Bunk/);
+});
+
+test('buttons from an earlier day are ignored', async () => {
+  const t = setup();
+  await t.service.markAll(t.session.id, 'P');
+  await t.service.mark(t.session.id, t.ids.Rohan, 'A');
+  await t.service.verify(t.session.id);
+  const btn = t.sent[0].buttons[0];
+  t.advance(24 * 60 * 60_000);
+  const r = await t.service.handleReply({ phone: '9000000003', payload: btn.id, text: btn.title });
+  assert.equal(r.matched, false);
 });

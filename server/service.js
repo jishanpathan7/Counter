@@ -36,7 +36,17 @@ export const AT_RISK = { minPct: 75, recentAbsences: 3, recentDays: 14 };
 export const REPLY_OPTIONS = {
   LEAVE: { title: 'Leave', status: 'L', note: 'Leave (parent replied)' },
   LATE: { title: 'Late 15 min', status: 'L', note: 'Late 15 min (parent replied)' },
+  // The case the product exists for: the parent thought the child was in class.
+  // The student stays absent and staff get an urgent call task that never closes by itself.
+  MISSING: {
+    title: 'Mujhe call karein',
+    status: 'A',
+    note: "Parent doesn't know where the child is",
+    urgent: true,
+    ack: 'Thank you. Our staff will call you right away.',
+  },
 };
+const REPLY_KEYS = Object.keys(REPLY_OPTIONS).join('|');
 
 /** Outcomes staff can record after calling a parent. */
 export const TASK_OUTCOMES = {
@@ -59,12 +69,23 @@ export function normalizePhone(raw) {
   return digits;
 }
 
-/** Map a free-text WhatsApp reply to a reply option, if it clearly means one. */
+/**
+ * Map a free-text WhatsApp reply to a reply option, if it clearly means one.
+ * A parent who believes the child should be in class ("ghar se nikal gaya tha", "why absent?")
+ * is MISSING, never LEAVE: a wrong "leave" would close the staff call in a real emergency.
+ * When unsure, return null so the reply escalates to a person.
+ */
 export function parseReplyText(text) {
-  const t = String(text ?? '').toLowerCase();
+  const t = String(text ?? '').toLowerCase().normalize('NFC');
   if (!t.trim()) return null;
-  const late = /\b(late|der|aa raha|aa rahi|coming|on the way|raste)\b/.test(t);
-  const leave = /\b(leave|chutti|chhutti|holiday|sick|bimar|beemar|nahi aayega|nahi aayegi|absent)\b/.test(t);
+  const missing =
+    /ghar se (nikla|nikli|nikal|gaya|gayi)|nikal (gaya|gayi|chuka|chuki)|\b(toh|to) (gaya|gayi|nikla|nikli)\b|gaya tha|gayi thi|left (home|for class|for coaching|the house|at)|already left|went to (class|coaching|tuition)|kahan (hai|gaya|gayi)|where is|pahuncha nahi|pahunchi nahi|घर से|निकल गय|पहुँचा नहीं|पहुंचा नहीं|कहाँ है|कहां है/.test(t) ||
+    /\b(why|kyu|kyun|kyon|kaise)\b[^.!]{0,25}\babsent\b|\babsent\b[^.!]{0,25}(\b(why|kyu|kyun|kyon|kaise)\b|\?)/.test(t);
+  if (missing) return 'MISSING';
+  const late =
+    /\b(late|der|deri|aa raha|aa rahi|aa rha|aa rhi|on the way|raste|rasta|traffic|reaching|will reach)\b|देर|लेट|आ रहा|आ रही|रास्ते/.test(t);
+  const leave =
+    /\b(leave|chutti|chhutti|holiday|sick|bimar|beemar|bukhar|fever|unwell|ill|tabiyat|tabiyet|doctor|hospital|shaadi|shadi|wedding|out of station|nahi aa payega|nahi aa payegi|nahi aa paayega|nahi aa paayegi|aaj nahi aayega|aaj nahi aayegi|nahi aa sakta|nahi aa sakti|not coming|won't come|will not come)\b|छुट्टी|बीमार|बुखार|तबीयत|शादी|नहीं आ/.test(t);
   if (late && !leave) return 'LATE';
   if (leave && !late) return 'LEAVE';
   return null;
@@ -438,10 +459,17 @@ export class AttendanceService {
     let alert = null;
     let choice = null;
 
-    const m = /^(LEAVE|LATE):(\d+)$/.exec(String(payload ?? ''));
+    const m = new RegExp(`^(${REPLY_KEYS}):(\\d+)$`).exec(String(payload ?? ''));
     if (m) {
       choice = m[1];
-      alert = this.db.prepare('SELECT * FROM alerts WHERE id = ? AND phone = ?').get(Number(m[2]), from) ?? null;
+      // Only today's alerts: an old button tapped days later must not rewrite history.
+      alert =
+        this.db
+          .prepare(
+            `SELECT al.* FROM alerts al JOIN sessions se ON se.id = al.session_id
+              WHERE al.id = ? AND al.phone = ? AND se.date = ?`,
+          )
+          .get(Number(m[2]), from, this.today()) ?? null;
     }
     if (!choice) choice = parseReplyText(text || payload);
     if (!alert && choice) {
@@ -462,6 +490,16 @@ export class AttendanceService {
       return { matched: false };
     }
 
+    // Once staff have called and logged an outcome, a later message doesn't overwrite it;
+    // it stays visible in the WhatsApp log for the front desk.
+    const current = this.db
+      .prepare('SELECT source FROM attendance WHERE session_id = ? AND student_id = ?')
+      .get(alert.session_id, alert.student_id);
+    if (current?.source === 'staff') {
+      this.changed();
+      return { matched: false, reason: 'staff-outcome' };
+    }
+
     const option = REPLY_OPTIONS[choice];
     const at = this.nowIso();
     this.db
@@ -473,9 +511,13 @@ export class AttendanceService {
           WHERE session_id = ? AND student_id = ?`,
       )
       .run(option.status, option.note, at, alert.session_id, alert.student_id);
-    this.closeTaskFor(alert.session_id, alert.student_id, `Parent replied: ${option.title}`);
+    if (option.urgent) {
+      this.createTask(alert.id, "URGENT: parent doesn't know where the child is", { urgent: true });
+    } else {
+      this.closeTaskFor(alert.session_id, alert.student_id, `Parent replied: ${option.title}`);
+    }
 
-    const ack = `Thank you. Noted: ${option.title}.`;
+    const ack = option.ack ?? `Thank you. Noted: ${option.title}.`;
     this.logMessage({ phone: from, direction: 'out', body: ack, alertId: alert.id });
     try {
       await this.messenger.send({ to: from, text: ack });
@@ -489,7 +531,17 @@ export class AttendanceService {
 
   // ---------------------------------------------- Step 6: staff call tasks
 
-  createTask(alertId, reason) {
+  createTask(alertId, reason, { urgent = false } = {}) {
+    if (urgent) {
+      // Urgent wins over an existing open task (e.g. "no reply") and reopens nothing staff closed.
+      this.db
+        .prepare(
+          `INSERT INTO tasks (alert_id, status, reason, created_at, urgent) VALUES (?, 'open', ?, ?, 1)
+           ON CONFLICT(alert_id) DO UPDATE SET urgent = 1, reason = excluded.reason WHERE tasks.status = 'open'`,
+        )
+        .run(alertId, reason, this.nowIso());
+      return;
+    }
     this.db
       .prepare("INSERT OR IGNORE INTO tasks (alert_id, status, reason, created_at) VALUES (?, 'open', ?, ?)")
       .run(alertId, reason, this.nowIso());
@@ -619,6 +671,7 @@ export class AttendanceService {
               sentAt: r.sent_at,
               replyDueAt: new Date(Date.parse(r.sent_at) + replyTimeoutMinutes * 60_000).toISOString(),
               reply: r.reply ? REPLY_OPTIONS[r.reply]?.title ?? r.reply : null,
+              replyKey: r.reply,
               repliedAt: r.replied_at,
               escalatedAt: r.escalated_at,
               error: r.error,
@@ -695,7 +748,7 @@ export class AttendanceService {
   listTasks(status = 'open') {
     return this.db
       .prepare(
-        `SELECT t.id, t.status, t.reason, t.created_at AS createdAt, t.done_at AS doneAt, t.outcome,
+        `SELECT t.id, t.status, t.reason, t.urgent, t.created_at AS createdAt, t.done_at AS doneAt, t.outcome,
                 st.id AS studentId, st.name AS studentName, st.parent_name AS parentName, al.phone AS parentPhone,
                 b.name AS batchName, se.date, se.starts_at AS startsAt, al.sent_at AS alertSentAt
            FROM tasks t
@@ -704,7 +757,7 @@ export class AttendanceService {
            JOIN sessions se ON se.id = al.session_id
            JOIN batches b ON b.id = se.batch_id
           WHERE t.status = ?
-          ORDER BY ${status === 'open' ? 't.created_at ASC' : 't.done_at DESC'}
+          ORDER BY ${status === 'open' ? 't.urgent DESC, t.created_at ASC' : 't.done_at DESC'}
           LIMIT 200`,
       )
       .all(status);
@@ -1069,7 +1122,8 @@ export class AttendanceService {
       const parent = a.parent_name || 'Parent';
       const who = { studentId: a.student_id, student: a.name };
       push(a.sent_at, a.status === 'failed' ? 'fail' : 'alert', a.status === 'failed' ? `WhatsApp to ${parent} failed (${a.name})` : `WhatsApp sent to ${parent} about ${a.name}`, who);
-      if (a.replied_at) push(a.replied_at, 'reply', `${parent} replied: ${REPLY_OPTIONS[a.reply]?.title ?? a.reply}`, who);
+      if (a.replied_at && a.reply === 'MISSING') push(a.replied_at, 'escalate', `${parent} doesn't know where ${a.name} is: urgent call`, who);
+      else if (a.replied_at) push(a.replied_at, 'reply', `${parent} replied: ${REPLY_OPTIONS[a.reply]?.title ?? a.reply}`, who);
       if (a.escalated_at) push(a.escalated_at, 'escalate', `No reply from ${parent}: call task created`, who);
       if (a.done_at) push(a.done_at, 'call', `Staff called about ${a.name}: ${a.outcome}`, who);
     }

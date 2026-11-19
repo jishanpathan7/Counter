@@ -71,6 +71,13 @@ export function StatusPill({ status }) {
 
 export function AlertState({ alert, task, now, tz }) {
   if (!alert) return null;
+  if (alert.replyKey === 'MISSING') {
+    return (
+      <span className="alert-state bad">
+        Parent doesn't know where the child is · {task?.status === 'done' ? `called: ${task.outcome}` : 'urgent call'}
+      </span>
+    );
+  }
   if (alert.status === 'replied') {
     return (
       <span className="alert-state ok">

@@ -3,7 +3,8 @@ import { DEMO_LOGINS, DEMO_PIN } from './seed.js';
 
 const port = Number(process.env.PORT ?? 3001);
 const tickSeconds = Number(process.env.TICK_SECONDS ?? 10);
-const { app, platform, tz, dataDir, isDemo } = createRuntime();
+// `npm run dev` passes --dev: demo data on by default, no session secret needed.
+const { app, platform, tz, dataDir, isDemo } = createRuntime({ dev: process.argv.includes('--dev') });
 
 let ticking = false;
 setInterval(async () => {

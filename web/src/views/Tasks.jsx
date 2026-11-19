@@ -25,12 +25,13 @@ function TaskCard({ task, now }) {
     }
   };
   return (
-    <li className="card task">
+    <li className={`card task ${task.urgent ? 'urgent' : ''}`}>
       <div className="task-head">
         <div className="who" style={{ alignItems: 'flex-start' }}>
           <Avatar name={task.studentName} />
           <div>
-            <div className="eyebrow">{task.reason} · {fmtAgo(task.createdAt, now)}</div>
+            <div className="eyebrow">{task.urgent ? <b className="error-text">Urgent · call now</b> : task.reason} · {fmtAgo(task.createdAt, now)}</div>
+            {task.urgent ? <div className="error-text small">The parent says they don't know where the child is.</div> : null}
             <h3>Call {task.parentName || 'parent'} about <a href={`#/students/${task.studentId}`} style={{ color: 'inherit' }}>{task.studentName}</a></h3>
             <div className="muted small">{task.batchName} · class at {fmtTime(task.startsAt)} · WhatsApp sent {fmtTime(task.alertSentAt)}</div>
           </div>

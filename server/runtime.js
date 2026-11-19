@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,17 +16,19 @@ export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '
  * data goes to the temporary folder, there is no background timer (the scheduler runs as
  * requests come in) and screens poll instead of keeping a live connection open.
  */
-export function createRuntime({ env = process.env, serverless = false, logger = console } = {}) {
+export function createRuntime({ env = process.env, serverless = false, dev = false, logger = console } = {}) {
   const envFile = path.join(ROOT, '.env');
   if (!serverless && fs.existsSync(envFile)) process.loadEnvFile(envFile);
 
   const tz = env.INSTITUTE_TZ || 'Asia/Kolkata';
   if (!isValidTimeZone(tz)) throw new Error(`INSTITUTE_TZ "${tz}" is not a valid time zone`);
   const dataDir = serverless ? path.join(env.TMPDIR || '/tmp', 'attendance-alert') : path.resolve(ROOT, env.DATA_DIR || 'data');
-  const demo = env.SEED_DEMO !== 'false';
+  // Demo data (and the demo logins on the login screen) only when explicitly asked for,
+  // or in local development. A production deploy never ships them by accident.
+  const demo = env.SEED_DEMO === 'true' || (dev && env.SEED_DEMO !== 'false');
 
-  if (serverless && !env.SESSION_SECRET) {
-    logger.warn?.('SESSION_SECRET is not set: logins will not survive across server instances.');
+  if (!dev && !(env.SESSION_SECRET && env.SESSION_SECRET.length >= 32)) {
+    throw new Error('SESSION_SECRET must be set to a random string of at least 32 characters, e.g. the output of `openssl rand -hex 32`.');
   }
 
   const hub = createEventHub();
@@ -63,10 +66,21 @@ export function createRuntime({ env = process.env, serverless = false, logger = 
       }
     : null;
 
+  // First-run setup creates the platform admin, so it needs a one-time code outside development.
+  // Use SETUP_TOKEN, or on a normal server a random code printed to the log.
+  let setupToken = null;
+  if (!dev && platform.needsSetup()) {
+    setupToken = env.SETUP_TOKEN || crypto.randomBytes(9).toString('base64url');
+    if (env.SETUP_TOKEN) logger.log?.('First-run setup needs the SETUP_TOKEN code.');
+    else if (serverless) logger.warn?.('Set SETUP_TOKEN to enable first-run setup on this deployment.');
+    else logger.log?.(`First-run setup code: ${setupToken}`);
+  }
+
   const app = createApp({
     platform,
     hub,
     demo: isDemo,
+    setupToken,
     realtime: !serverless,
     ephemeral: serverless,
     tickOnRequest,

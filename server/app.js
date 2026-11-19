@@ -48,7 +48,7 @@ function csvCell(v) {
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-export function createApp({ platform, hub, demo = false, realtime = true, ephemeral = false, tickOnRequest = null, staticDir = null, logger = console }) {
+export function createApp({ platform, hub, demo = false, setupToken = null, realtime = true, ephemeral = false, tickOnRequest = null, staticDir = null, logger = console }) {
   const app = express();
   app.disable('x-powered-by');
   app.use(express.json({ limit: '1mb', verify: (req, _res, buf) => (req.rawBody = buf) }));
@@ -70,22 +70,18 @@ export function createApp({ platform, hub, demo = false, realtime = true, epheme
   }
 
   // ------------------------------------------------------------------ WhatsApp webhooks (one per institute)
-  const webhookService = (slug) => {
-    if (slug) return platform.service(slug);
-    const all = platform.listInstitutes();
-    if (all.length !== 1) throw new HttpError(404, 'Use /webhooks/whatsapp/<institute>');
-    return platform.service(all[0].slug);
-  };
   const verifyWebhook = (req, res) => {
-    const cfg = webhookService(req.params.slug).getWhatsAppConfig();
+    const cfg = platform.service(req.params.slug).getWhatsAppConfig();
     const ok = req.query['hub.mode'] === 'subscribe' && cfg.verifyToken && req.query['hub.verify_token'] === cfg.verifyToken;
     if (!ok) return res.sendStatus(403);
     res.type('text/plain').send(String(req.query['hub.challenge'] ?? ''));
   };
   const receiveWebhook = async (req, res) => {
-    const svc = webhookService(req.params.slug);
+    const svc = platform.service(req.params.slug);
     const cfg = svc.getWhatsAppConfig();
-    if (cfg.appSecret && !verifySignature(req.rawBody, req.get('x-hub-signature-256'), cfg.appSecret)) return res.sendStatus(401);
+    // Signatures are mandatory: otherwise anyone who knows the URL could forge a parent's reply.
+    if (!cfg.appSecret) return res.sendStatus(403);
+    if (!verifySignature(req.rawBody, req.get('x-hub-signature-256'), cfg.appSecret)) return res.sendStatus(401);
     res.sendStatus(200); // acknowledge fast; Meta retries slow webhooks
     for (const reply of parseWebhook(req.body)) {
       try {
@@ -97,8 +93,6 @@ export function createApp({ platform, hub, demo = false, realtime = true, epheme
   };
   app.get('/webhooks/whatsapp/:slug', verifyWebhook);
   app.post('/webhooks/whatsapp/:slug', receiveWebhook);
-  app.get('/webhooks/whatsapp', verifyWebhook);
-  app.post('/webhooks/whatsapp', receiveWebhook);
 
   // ------------------------------------------------------------------ auth
   const userOf = (req) => platform.userFromToken(parseCookies(req.headers.cookie)[COOKIE]);
@@ -113,6 +107,7 @@ export function createApp({ platform, hub, demo = false, realtime = true, epheme
     const u = userOf(req);
     res.json({
       needsSetup: platform.needsSetup(),
+      setupCodeRequired: Boolean(setupToken) && platform.needsSetup(),
       user: platform.publicUser(u),
       memberships: u ? platform.membershipsFor(u) : [],
       demo: demo ? { pin: DEMO_PIN, logins: DEMO_LOGINS, ephemeral } : null,
@@ -133,7 +128,10 @@ export function createApp({ platform, hub, demo = false, realtime = true, epheme
   // First run: create the agency admin and the first institute.
   app.post('/api/setup', (req, res) => {
     if (!platform.needsSetup()) throw new HttpError(409, 'Already set up');
-    const { name, phone, pin, instituteName, slug, city } = req.body ?? {};
+    const { name, phone, pin, instituteName, slug, city, setupCode } = req.body ?? {};
+    if (setupToken && String(setupCode ?? '').trim() !== setupToken) {
+      throw new HttpError(403, 'Wrong setup code. It is printed in the server log when the server starts.');
+    }
     const user = platform.createUser({ name, phone, pin, isAgency: true });
     const inst = platform.createInstitute({ name: instituteName, slug, city, ownerUserId: user.id });
     setSession(req, res, user);

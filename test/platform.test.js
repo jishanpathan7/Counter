@@ -3,6 +3,11 @@ import assert from 'node:assert/strict';
 import { Platform } from '../server/platform.js';
 import { createApp, createEventHub } from '../server/app.js';
 import { seedDemo } from '../server/seed.js';
+import { createRuntime } from '../server/runtime.js';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 const quiet = { error() {} };
 
@@ -174,4 +179,81 @@ test('simulator reply, CSV export, WhatsApp settings never leak secrets', async 
   assert.equal(await ok.text(), '42');
   const bad = await fetch(`${base}/webhooks/whatsapp/bright-future?hub.mode=subscribe&hub.verify_token=nope&hub.challenge=42`);
   assert.equal(bad.status, 403);
+});
+
+test('owners cannot take over accounts that belong to another institute or the agency', async (tt) => {
+  const { client } = await start(tt);
+  const owner = client();
+  await owner.login('9999900001');
+
+  // The agency admin can't be added at all.
+  assert.equal((await owner.call('POST', '/api/i/bright-future/team', { name: 'x', phone: '9999900000', pin: '1111', role: 'staff' })).status, 409);
+
+  // Another institute's owner can be added, but their name and PIN stay theirs.
+  const added = await owner.call('POST', '/api/i/bright-future/team', { name: 'Fake Name', phone: '9999900004', pin: '1111', role: 'staff' });
+  assert.equal(added.status, 201);
+  assert.equal(added.body.sharedAccount, true);
+  assert.equal((await owner.call('PATCH', `/api/i/bright-future/team/${added.body.id}`, { pin: '4321' })).status, 403);
+  assert.equal((await owner.call('PATCH', `/api/i/bright-future/team/${added.body.id}`, { name: 'Hacked' })).status, 403);
+  // Role changes are still fine.
+  assert.equal((await owner.call('PATCH', `/api/i/bright-future/team/${added.body.id}`, { role: 'teacher' })).status, 200);
+
+  const victim = client();
+  assert.equal((await victim.login('9999900004', '4321')).status, 401, 'attacker PIN does not work');
+  assert.equal((await victim.login('9999900004', '1234')).status, 200, 'original PIN still works');
+  assert.equal((await victim.call('GET', '/api/auth/me')).body.user.name, 'Sunita Verma');
+
+  // Removing them from this institute doesn't sign them out of their own.
+  assert.equal((await owner.call('DELETE', `/api/i/bright-future/team/${added.body.id}`)).status, 204);
+  assert.equal((await victim.call('GET', '/api/i/excel/board')).status, 200);
+});
+
+test('webhooks are rejected unless signed with the app secret; the unscoped route is gone', async (tt) => {
+  const { client, platform, base } = await start(tt);
+  const owner = client();
+  await owner.login('9999900001');
+  const svc = platform.service('bright-future');
+  const jee = svc.listBatches().find((b) => b.name.includes('JEE'));
+  const s = (await owner.call('POST', `/api/i/bright-future/batches/${jee.id}/today`)).body;
+  await owner.call('POST', `/api/i/bright-future/sessions/${s.id}/mark-all`, { status: 'P' });
+  const yash = s.students.find((x) => x.name.startsWith('Yash'));
+  await owner.call('POST', `/api/i/bright-future/sessions/${s.id}/mark`, { studentId: yash.id, status: 'A' });
+  await owner.call('POST', `/api/i/bright-future/sessions/${s.id}/verify`);
+
+  const body = JSON.stringify({ entry: [{ changes: [{ value: { messages: [{ from: yash.parentPhone, type: 'text', text: { body: 'chutti' } }] } }] }] });
+  const post = (url, headers = {}) => fetch(`${base}${url}`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body });
+
+  assert.equal((await post('/webhooks/whatsapp/bright-future')).status, 403, 'no app secret configured: rejected');
+  assert.equal((await post('/webhooks/whatsapp')).status, 404, 'legacy unscoped route removed');
+
+  svc.updateWhatsAppConfig({ appSecret: 's3cret' });
+  assert.equal((await post('/webhooks/whatsapp/bright-future', { 'x-hub-signature-256': 'sha256=forged' })).status, 401);
+  assert.equal(svc.getSessionView(s.id).students.find((x) => x.id === yash.id).status, 'A', 'forged reply changed nothing');
+
+  const sig = `sha256=${crypto.createHmac('sha256', 's3cret').update(body).digest('hex')}`;
+  assert.equal((await post('/webhooks/whatsapp/bright-future', { 'x-hub-signature-256': sig })).status, 200);
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(svc.getSessionView(s.id).students.find((x) => x.id === yash.id).status, 'L');
+});
+
+test('production runtime: secret required, no demo data, setup needs the code', async (tt) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aa-runtime-'));
+  tt.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const quietLog = { log() {}, warn() {}, error() {} };
+  assert.throws(() => createRuntime({ env: { DATA_DIR: dir }, logger: quietLog }), /SESSION_SECRET/);
+  assert.throws(() => createRuntime({ env: { DATA_DIR: dir, SESSION_SECRET: 'short' }, logger: quietLog }), /SESSION_SECRET/);
+
+  const { app } = createRuntime({ env: { DATA_DIR: dir, SESSION_SECRET: 'x'.repeat(40), SETUP_TOKEN: 'open-sesame' }, logger: quietLog });
+  const server = app.listen(0);
+  tt.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const me = await (await fetch(`${base}/api/auth/me`)).json();
+  assert.equal(me.demo, null, 'no demo logins exposed');
+  assert.equal(me.needsSetup, true);
+  assert.equal(me.setupCodeRequired, true);
+
+  const setup = (code) => fetch(`${base}/api/setup`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'Admin', phone: '9811111111', pin: '482915', instituteName: 'Star Classes', setupCode: code }) });
+  assert.equal((await setup('guess')).status, 403);
+  assert.equal((await setup('open-sesame')).status, 201);
 });

@@ -65,7 +65,7 @@ function SessionCard({ session, tz, now, isToday }) {
       ) : (
         <ul className="roster">
           {session.students.map((s) => (
-            <li key={s.id} className={`roster-row ${s.alert && s.alert.status !== 'replied' && s.status === 'A' && s.task?.status !== 'done' ? 'flag' : ''}`}>
+            <li key={s.id} className={`roster-row ${s.task?.status === 'open' || (s.alert && s.alert.status === 'sent' && s.status === 'A') ? 'flag' : ''}`}>
               <div className="roster-main">
                 <a className="roster-name" href={`#/students/${s.id}`} style={{ color: 'inherit', textDecoration: 'none' }}>{s.name}</a>
                 <StatusPill status={s.status} />
