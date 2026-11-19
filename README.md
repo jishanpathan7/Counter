@@ -141,6 +141,23 @@ setup wizard where you create your account and first institute; it asks for a **
 is printed in the server log at startup (or set your own with `SETUP_TOKEN`). Data lives in `DATA_DIR` (default `data/`): `platform.db` holds users and institutes, and
 `institutes/<name>.db` holds each institute's data. Back up that folder.
 
+## Running it for real institutes
+
+`deploy/` has everything to run it on your own server in India: a Docker image, Caddy for automatic
+HTTPS, and Litestream copying every database change to S3-compatible storage within seconds. A new
+server restores itself from that backup on first start. Also included:
+- a health check that also catches a stalled scheduler;
+- error reports to Sentry with phone numbers masked;
+- a monthly restore drill (`node server/backup.js drill`);
+- point-in-time copies covering 30 days.
+
+Follow **[deploy/README.md](deploy/README.md)**:
+
+```sh
+cd deploy && cp .env.example .env     # domain, secrets, backup bucket
+docker compose up -d --build
+```
+
 ## Deploying on Vercel (demo)
 
 The repo deploys to Vercel as-is: `vercel.json` builds the app into `dist/` and runs the API from
@@ -149,8 +166,8 @@ for the demo, `SEED_DEMO=true`. Without demo data, set `SETUP_TOKEN` to enable f
 
 On Vercel the app runs in **demo mode**: data lives in the function's temporary folder and is reset
 whenever Vercel starts a fresh instance, the alert timers run as requests come in, and screens
-refresh every few seconds instead of over a live connection. For real institutes, use a host with
-an always-on server and a disk (`npm start`), or move the data to a hosted database.
+refresh every few seconds instead of over a live connection. For real institutes, use the Docker
+setup above.
 
 ## Connecting real WhatsApp
 
@@ -179,7 +196,10 @@ Each institute connects its own WhatsApp Business number in **Settings → Whats
 
 ```
 server/
-  index.js      starts the server and the scheduler (reads .env)
+  index.js      starts the server and the scheduler (reads .env), stops cleanly on SIGTERM
+  runtime.js    builds the platform and app from environment settings
+  backup.js     Litestream config, restore on start, restore drill, point-in-time copies
+  errors.js     error reports to Sentry (numbers masked, no request data)
   platform.js   users, PIN login, institutes, memberships, agency overview
   app.js        HTTP API with role checks, WhatsApp webhooks, live updates (server-sent events)
   service.js    one institute: marking, verify, alerts, replies, escalation, calls,
@@ -194,5 +214,7 @@ web/src/
                 Tasks, Messages, Reports, Settings
   ui.jsx        icons, pills, modal, drawer, theme;  charts.jsx  trend chart, heatmap, sparkline
 web/public/     PWA manifest, icons, service worker
-test/           service flow tests and HTTP/role tests (node --test)
+deploy/         docker-compose (app + Caddy), Caddyfile, entrypoint, production runbook
+Dockerfile      production image (non-root, with Litestream)
+test/           flow, HTTP/role, operations and backup tests (node --test)
 ```

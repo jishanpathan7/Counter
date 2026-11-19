@@ -136,8 +136,10 @@ export class Platform {
   /**
    * @param dataDir  folder for platform.db and one database per institute; null keeps everything in memory (tests)
    */
-  constructor({ dataDir = null, tz = 'Asia/Kolkata', clock = () => Date.now(), env = {}, onChange = () => {}, logger = console }) {
+  constructor({ dataDir = null, tz = 'Asia/Kolkata', clock = () => Date.now(), env = {}, onChange = () => {}, logger = console, reporter = null }) {
     this.dataDir = dataDir;
+    this.reporter = reporter;
+    this.lastTickAt = null;
     this.tz = tz;
     this.clock = clock;
     this.env = env;
@@ -146,7 +148,8 @@ export class Platform {
     this.services = new Map();
     if (dataDir) fs.mkdirSync(path.join(dataDir, 'institutes'), { recursive: true });
     this.db = new DatabaseSync(dataDir ? path.join(dataDir, 'platform.db') : ':memory:');
-    if (dataDir) this.db.exec('PRAGMA journal_mode = WAL;');
+    // WAL + a busy timeout: the backup process (Litestream) briefly holds read locks.
+    if (dataDir) this.db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
     this.db.exec('PRAGMA foreign_keys = ON;');
     this.db.exec(SCHEMA);
   }
@@ -370,8 +373,28 @@ export class Platform {
         await this.service(slug).tick();
       } catch (err) {
         this.logger.error?.(`Scheduler failed for ${slug}:`, err);
+        this.reporter?.capture(err, { tags: { where: 'scheduler', institute: slug } });
       }
     });
+    this.lastTickAt = this.clock();
+  }
+
+  /** Is the database answering? (for the health check) */
+  ping() {
+    return this.db.prepare('SELECT 1 AS ok').get().ok === 1;
+  }
+
+  /** Close every database cleanly (on shutdown), so the last writes are in the main files. */
+  close() {
+    for (const svc of this.services.values()) {
+      try {
+        svc.db.close();
+      } catch {
+        /* already closed */
+      }
+    }
+    this.services.clear();
+    this.db.close();
   }
 
   // ----------------------------------------------------------- memberships

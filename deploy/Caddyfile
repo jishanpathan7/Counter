@@ -1,0 +1,9 @@
+# HTTPS for your domain: Caddy gets the certificate from Let's Encrypt and renews it by itself.
+{$DOMAIN} {
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+	reverse_proxy app:3001
+}

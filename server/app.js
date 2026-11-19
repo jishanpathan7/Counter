@@ -48,7 +48,7 @@ function csvCell(v) {
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-export function createApp({ platform, hub, demo = false, setupToken = null, realtime = true, ephemeral = false, tickOnRequest = null, trustProxy = 'loopback', staticDir = null, logger = console }) {
+export function createApp({ platform, hub, demo = false, setupToken = null, realtime = true, ephemeral = false, tickOnRequest = null, trustProxy = 'loopback', staticDir = null, reporter = null, release = null, schedulerMaxAgeMs = 0, logger = console }) {
   const app = express();
   app.disable('x-powered-by');
   // Behind a reverse proxy (Caddy on the same machine, or Vercel), take the visitor's real address for login limits.
@@ -99,6 +99,7 @@ export function createApp({ platform, hub, demo = false, setupToken = null, real
         await svc.handleReply(reply);
       } catch (err) {
         logger.error?.(`Webhook reply failed: ${err.message}`);
+        reporter?.capture(err, { tags: { where: 'webhook', institute: req.params.slug } });
       }
     }
     res.sendStatus(200);
@@ -115,7 +116,28 @@ export function createApp({ platform, hub, demo = false, setupToken = null, real
   };
   const meUser = (u) => (u ? { ...platform.publicUser(u), mustChangePin: Boolean(u.mustChangePin) } : null);
 
-  app.get('/api/health', (_req, res) => res.json({ ok: true }));
+  // For uptime monitors and Docker: 503 if the database doesn't answer or the scheduler has stalled
+  // (a stalled scheduler means no alerts go out, which looks fine from outside but isn't).
+  const startedAt = Date.now();
+  app.get('/api/health', (_req, res) => {
+    const problems = [];
+    try {
+      if (!platform.ping()) problems.push('database');
+    } catch {
+      problems.push('database');
+    }
+    if (schedulerMaxAgeMs) {
+      const last = platform.lastTickAt ?? startedAt;
+      if (Date.now() - last > schedulerMaxAgeMs) problems.push('scheduler');
+    }
+    res.set('Cache-Control', 'no-store');
+    res.status(problems.length ? 503 : 200).json({
+      ok: !problems.length,
+      ...(problems.length ? { problems } : {}),
+      ...(release ? { release } : {}),
+      uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
+    });
+  });
 
   app.get('/api/auth/me', (req, res) => {
     const u = userOf(req);
@@ -386,7 +408,10 @@ export function createApp({ platform, hub, demo = false, setupToken = null, real
   // eslint-disable-next-line no-unused-vars
   app.use((err, _req, res, _next) => {
     const status = err.status ?? err.statusCode ?? 500;
-    if (status >= 500) logger.error?.(err);
+    if (status >= 500) {
+      logger.error?.(err);
+      reporter?.capture(err, { tags: { where: 'http', institute: _req.params?.slug }, request: { method: _req.method, path: _req.path } });
+    }
     res.status(status).json({ error: status >= 500 ? 'Something went wrong' : err.message });
   });
 

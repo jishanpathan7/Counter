@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Platform } from './platform.js';
 import { createApp, createEventHub } from './app.js';
+import { createErrorReporter } from './errors.js';
 import { seedDemo } from './seed.js';
 import { isValidTimeZone } from './time.js';
 
@@ -40,8 +41,18 @@ export function createRuntime({ env = process.env, serverless = false, dev = fal
     throw new Error('SESSION_SECRET must be set to a random string of at least 32 characters, e.g. the output of `openssl rand -hex 32`.');
   }
 
+  // Which build is running (set by the Docker build or Vercel), shown in /api/health and error reports.
+  const release = env.APP_RELEASE || env.VERCEL_GIT_COMMIT_SHA?.slice(0, 12) || null;
+  const reporter = createErrorReporter({
+    dsn: env.SENTRY_DSN || '',
+    environment: env.SENTRY_ENVIRONMENT || (dev ? 'development' : serverless ? 'preview' : 'production'),
+    release,
+    logger,
+  });
+  const tickMs = Math.max(1, Number(env.TICK_SECONDS ?? 10)) * 1000;
+
   const hub = createEventHub();
-  const platform = new Platform({ dataDir, tz, env, logger, onChange: (slug) => hub.broadcast(slug) });
+  const platform = new Platform({ dataDir, tz, env, logger, reporter, onChange: (slug) => hub.broadcast(slug) });
 
   const seeded = demo && seedDemo(platform);
   if (seeded) platform.setMeta('demo', '1');
@@ -94,9 +105,13 @@ export function createRuntime({ env = process.env, serverless = false, dev = fal
     ephemeral: serverless,
     tickOnRequest,
     trustProxy: serverless ? true : parseTrustProxy(env.TRUST_PROXY),
+    reporter,
+    release,
+    // A scheduler that hasn't run for a few rounds is a problem (no alerts go out). Serverless has none.
+    schedulerMaxAgeMs: serverless ? 0 : Math.max(60_000, tickMs * 6),
     staticDir: serverless ? null : path.join(ROOT, 'dist'),
     logger,
   });
 
-  return { app, platform, tz, dataDir, isDemo };
+  return { app, platform, tz, dataDir, isDemo, reporter, tickMs };
 }

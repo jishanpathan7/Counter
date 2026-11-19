@@ -121,7 +121,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_phone ON messages(phone);
 
 export function openDb(file = ':memory:') {
   const db = new DatabaseSync(file);
-  if (file !== ':memory:') db.exec('PRAGMA journal_mode = WAL;');
+  if (file !== ':memory:') db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
   db.exec('PRAGMA foreign_keys = ON;');
   db.exec(SCHEMA);
   migrate(db);
