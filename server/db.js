@@ -1,0 +1,208 @@
+import fs from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
+import { hasColumn, runMigrations } from './migrate.js';
+
+// P present · A absent · L leave · T late (arrived late, or parent says they're on the way)
+const attendanceTable = (name) => `CREATE TABLE IF NOT EXISTS ${name} (
+  session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  status     TEXT NOT NULL CHECK (status IN ('P', 'A', 'L', 'T')),
+  note       TEXT,
+  source     TEXT NOT NULL,                       -- teacher | system | parent | staff
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (session_id, student_id)
+);`;
+
+const SCHEMA = `
+CREATE TABLE IF NOT EXISTS settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS batches (
+  id         INTEGER PRIMARY KEY,
+  name       TEXT NOT NULL,
+  start_time TEXT NOT NULL,                       -- 'HH:MM' in the institute's time zone
+  days       TEXT NOT NULL DEFAULT '1,2,3,4,5,6', -- weekdays, 0 = Sunday
+  active     INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS students (
+  id           INTEGER PRIMARY KEY,
+  batch_id     INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
+  name         TEXT NOT NULL,
+  parent_name  TEXT,
+  parent_phone TEXT NOT NULL,                     -- digits only, with country code
+  active       INTEGER NOT NULL DEFAULT 1
+);
+
+-- One class session per batch per day.
+CREATE TABLE IF NOT EXISTS sessions (
+  id          INTEGER PRIMARY KEY,
+  batch_id    INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
+  date        TEXT NOT NULL,
+  starts_at   TEXT NOT NULL,
+  submitted_at TEXT,                             -- the teacher sent the list to the office
+  verified_at TEXT,
+  UNIQUE (batch_id, date)
+);
+
+${attendanceTable('attendance')}
+
+-- One WhatsApp alert per absent student per session.
+CREATE TABLE IF NOT EXISTS alerts (
+  id           INTEGER PRIMARY KEY,
+  session_id   INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  student_id   INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  phone        TEXT NOT NULL,
+  status       TEXT NOT NULL CHECK (status IN ('sent', 'replied', 'escalated', 'failed')),
+  sent_at      TEXT NOT NULL,
+  reply        TEXT,
+  replied_at   TEXT,
+  escalated_at TEXT,
+  error        TEXT,
+  UNIQUE (session_id, student_id)
+);
+
+-- Staff call task, created when a parent does not reply in time.
+CREATE TABLE IF NOT EXISTS tasks (
+  id         INTEGER PRIMARY KEY,
+  alert_id   INTEGER NOT NULL REFERENCES alerts(id) ON DELETE CASCADE,
+  status     TEXT NOT NULL CHECK (status IN ('open', 'done')),
+  reason     TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  done_at    TEXT,
+  outcome    TEXT,
+  urgent     INTEGER NOT NULL DEFAULT 0,          -- parent says they don't know where the child is
+  UNIQUE (alert_id)
+);
+
+-- Every WhatsApp message in or out, for the audit trail and the simulator.
+CREATE TABLE IF NOT EXISTS messages (
+  id         INTEGER PRIMARY KEY,
+  phone      TEXT NOT NULL,
+  direction  TEXT NOT NULL CHECK (direction IN ('out', 'in')),
+  body       TEXT NOT NULL,
+  buttons    TEXT,
+  alert_id   INTEGER REFERENCES alerts(id) ON DELETE SET NULL,
+  error      TEXT,
+  created_at TEXT NOT NULL
+);
+
+-- WhatsApp consent per parent number (one record covers siblings on the same number).
+CREATE TABLE IF NOT EXISTS consents (
+  phone       TEXT PRIMARY KEY,
+  status      TEXT NOT NULL CHECK (status IN ('opted_in', 'opted_out')),
+  source      TEXT NOT NULL,                     -- whatsapp (parent sent START/STOP) | staff (admission form)
+  wording     TEXT,                              -- what the parent agreed to, for the record
+  recorded_by TEXT,
+  updated_at  TEXT NOT NULL
+);
+
+-- Every consent change, kept as evidence (WhatsApp opt-in rules, DPDP).
+CREATE TABLE IF NOT EXISTS consent_log (
+  id          INTEGER PRIMARY KEY,
+  phone       TEXT NOT NULL,
+  status      TEXT NOT NULL,
+  source      TEXT NOT NULL,
+  wording     TEXT,
+  recorded_by TEXT,
+  at          TEXT NOT NULL
+);
+
+-- What happened and who did it: the alert loop step by step, plus who opened which student's
+-- details (access log). Used for the loop metrics; personal data stays in the other tables.
+CREATE TABLE IF NOT EXISTS events (
+  id         INTEGER PRIMARY KEY,
+  at         TEXT NOT NULL,
+  type       TEXT NOT NULL,
+  actor      TEXT,
+  session_id INTEGER,
+  student_id INTEGER,
+  alert_id   INTEGER,
+  data       TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_events_type_at ON events(type, at);
+CREATE INDEX IF NOT EXISTS idx_events_student ON events(student_id);
+-- Exports and erasures, so the institute can show what was done with personal data and when.
+-- Never holds the personal data itself (an erased student is recorded by number, not name).
+CREATE TABLE IF NOT EXISTS privacy_log (
+  id     INTEGER PRIMARY KEY,
+  at     TEXT NOT NULL,
+  actor  TEXT,
+  action TEXT NOT NULL,
+  detail TEXT
+);
+CREATE TABLE IF NOT EXISTS holidays (
+  date  TEXT PRIMARY KEY,                         -- 'YYYY-MM-DD'
+  label TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_date ON sessions(date);
+CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts(status);
+CREATE INDEX IF NOT EXISTS idx_alerts_phone ON alerts(phone);
+CREATE INDEX IF NOT EXISTS idx_messages_phone ON messages(phone);
+`;
+
+/** Institute database changes, in order. Add new ones at the end with the next number; never edit old ones. */
+export const MIGRATIONS = [
+  { version: 1, name: 'class length', up: (db) => hasColumn(db, 'batches', 'duration_minutes') || db.exec('ALTER TABLE batches ADD COLUMN duration_minutes INTEGER NOT NULL DEFAULT 120') },
+  { version: 2, name: 'urgent calls', up: (db) => hasColumn(db, 'tasks', 'urgent') || db.exec('ALTER TABLE tasks ADD COLUMN urgent INTEGER NOT NULL DEFAULT 0') },
+  {
+    version: 3,
+    name: 'WhatsApp message ids and delivery',
+    up: (db) => {
+      if (!hasColumn(db, 'messages', 'wamid')) {
+        db.exec('ALTER TABLE messages ADD COLUMN wamid TEXT; ALTER TABLE messages ADD COLUMN status TEXT; ALTER TABLE messages ADD COLUMN status_at TEXT');
+      }
+      // Meta retries webhooks: one row per WhatsApp message id, so a retry is recognised and ignored.
+      db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_wamid ON messages(wamid) WHERE wamid IS NOT NULL');
+      if (!hasColumn(db, 'alerts', 'delivery')) db.exec('ALTER TABLE alerts ADD COLUMN delivery TEXT');
+    },
+  },
+  {
+    version: 4,
+    name: 'teacher sends the list',
+    up: (db) => {
+      if (hasColumn(db, 'sessions', 'submitted_at')) return;
+      db.exec('ALTER TABLE sessions ADD COLUMN submitted_at TEXT');
+      db.exec('UPDATE sessions SET submitted_at = verified_at WHERE verified_at IS NOT NULL');
+    },
+  },
+  {
+    version: 5,
+    name: 'late as its own status',
+    up: (db) => {
+      // Older databases only allowed P/A/L: rebuild the table to add T (late) and move late records over.
+      const att = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'attendance'").get()?.sql ?? '';
+      if (att.includes("'T'")) return;
+      db.exec(attendanceTable('attendance_v2'));
+      db.exec(`INSERT INTO attendance_v2 SELECT session_id, student_id,
+                 CASE WHEN status = 'L' AND note LIKE 'Late%' THEN 'T' ELSE status END, note, source, updated_at
+               FROM attendance`);
+      db.exec('DROP TABLE attendance');
+      db.exec('ALTER TABLE attendance_v2 RENAME TO attendance');
+    },
+  },
+  { version: 6, name: 'removal date', up: (db) => hasColumn(db, 'students', 'removed_at') || db.exec('ALTER TABLE students ADD COLUMN removed_at TEXT') },
+  {
+    version: 7,
+    name: 'second guardian',
+    up: (db) => {
+      if (!hasColumn(db, 'students', 'guardian2_phone')) db.exec('ALTER TABLE students ADD COLUMN guardian2_name TEXT; ALTER TABLE students ADD COLUMN guardian2_phone TEXT');
+      if (!hasColumn(db, 'alerts', 'phone2')) db.exec('ALTER TABLE alerts ADD COLUMN phone2 TEXT');
+    },
+  },
+];
+export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
+
+export function openDb(file = ':memory:', { logger = console } = {}) {
+  const existing = file !== ':memory:' && fs.existsSync(file) && fs.statSync(file).size > 0;
+  const db = new DatabaseSync(file);
+  if (file !== ':memory:') db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
+  // secure_delete: erased rows are overwritten in the file, not left behind in free pages.
+  db.exec('PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;');
+  db.exec(SCHEMA);
+  runMigrations(db, MIGRATIONS, { file, existing, logger, label: file === ':memory:' ? 'database' : file.split('/').pop() });
+  return db;
+}
