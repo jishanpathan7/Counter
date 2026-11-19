@@ -156,6 +156,10 @@ export function openDb(file = ':memory:') {
 function migrate(db) {
   const hasColumn = (table, col) => db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col);
   if (!hasColumn('students', 'removed_at')) db.exec('ALTER TABLE students ADD COLUMN removed_at TEXT');
+  // A second parent or guardian who also gets the alerts (optional).
+  if (!hasColumn('students', 'guardian2_phone')) db.exec('ALTER TABLE students ADD COLUMN guardian2_name TEXT; ALTER TABLE students ADD COLUMN guardian2_phone TEXT');
+  // The second guardian's number an alert was also sent to, so their reply matches it.
+  if (!hasColumn('alerts', 'phone2')) db.exec('ALTER TABLE alerts ADD COLUMN phone2 TEXT');
   if (!hasColumn('batches', 'duration_minutes')) {
     db.exec('ALTER TABLE batches ADD COLUMN duration_minutes INTEGER NOT NULL DEFAULT 120');
   }

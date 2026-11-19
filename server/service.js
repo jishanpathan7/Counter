@@ -81,6 +81,29 @@ export const TASK_OUTCOMES = {
 };
 
 const STATUSES = ['P', 'A', 'L', 'T'];
+/** "Aarav", "Aarav & Diya", "Aarav, Diya & Kabir" (works in Hinglish, English and Hindi templates). */
+export const joinNames = (names) => (names.length < 2 ? names[0] ?? '' : `${names.slice(0, -1).join(', ')} & ${names.at(-1)}`);
+
+/** The alert ids a message's reply buttons answer for (siblings share one message). */
+function alertIdsOf(msg) {
+  try {
+    const id = JSON.parse(msg.buttons)?.[0]?.id ?? '';
+    const ids = id.split(':')[1]?.split(',').map(Number).filter(Boolean);
+    return ids?.length ? ids : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Optional second guardian: both fields empty, or a valid number different from the first. */
+function parseGuardian2(name, phone, primaryPhone) {
+  const p = String(phone ?? '').trim();
+  if (!p) return { name: null, phone: null };
+  const parsed = parsePhone(p);
+  if (parsed === primaryPhone) throw new HttpError(400, "The second guardian's number is the same as the first");
+  return { name: String(name ?? '').trim() || null, phone: parsed };
+}
+
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 export const STATUS_WORDS = { P: 'present', A: 'absent', L: 'on leave', T: 'late' };
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -336,16 +359,19 @@ export class AttendanceService {
   // ---------------------------------------------------------------- students
 
   listStudents(batchId) {
-    const sql = `SELECT id, batch_id AS batchId, name, parent_name AS parentName, parent_phone AS parentPhone
+    const sql = `SELECT id, batch_id AS batchId, name, parent_name AS parentName, parent_phone AS parentPhone,
+                        guardian2_name AS guardian2Name, guardian2_phone AS guardian2Phone
                    FROM students WHERE active = 1 ${batchId ? 'AND batch_id = ?' : ''} ORDER BY name`;
     return batchId ? this.db.prepare(sql).all(batchId) : this.db.prepare(sql).all();
   }
 
-  createStudent({ batchId, name, parentName, parentPhone }) {
+  createStudent({ batchId, name, parentName, parentPhone, guardian2Name = '', guardian2Phone = '' }) {
     const batch = this.getBatch(batchId);
+    const phone = parsePhone(parentPhone);
+    const g2 = parseGuardian2(guardian2Name, guardian2Phone, phone);
     const r = this.db
-      .prepare('INSERT INTO students (batch_id, name, parent_name, parent_phone) VALUES (?, ?, ?, ?)')
-      .run(batch.id, requireText(name, 'Student name'), String(parentName ?? '').trim() || null, parsePhone(parentPhone));
+      .prepare('INSERT INTO students (batch_id, name, parent_name, parent_phone, guardian2_name, guardian2_phone) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(batch.id, requireText(name, 'Student name'), String(parentName ?? '').trim() || null, phone, g2.name, g2.phone);
     this.changed();
     return this.listStudents(batch.id).find((s) => s.id === Number(r.lastInsertRowid));
   }
@@ -357,9 +383,13 @@ export class AttendanceService {
     const name = patch.name !== undefined ? requireText(patch.name, 'Student name') : s.name;
     const parentName = patch.parentName !== undefined ? String(patch.parentName).trim() || null : s.parent_name;
     const parentPhone = patch.parentPhone !== undefined ? parsePhone(patch.parentPhone) : s.parent_phone;
+    const g2 =
+      patch.guardian2Phone !== undefined || patch.guardian2Name !== undefined
+        ? parseGuardian2(patch.guardian2Name ?? s.guardian2_name, patch.guardian2Phone ?? s.guardian2_phone, parentPhone)
+        : { name: s.guardian2_name, phone: s.guardian2_phone };
     this.db
-      .prepare('UPDATE students SET batch_id = ?, name = ?, parent_name = ?, parent_phone = ? WHERE id = ?')
-      .run(batchId, name, parentName, parentPhone, s.id);
+      .prepare('UPDATE students SET batch_id = ?, name = ?, parent_name = ?, parent_phone = ?, guardian2_name = ?, guardian2_phone = ? WHERE id = ?')
+      .run(batchId, name, parentName, parentPhone, g2.name, g2.phone, s.id);
     this.changed();
     return this.listStudents(batchId).find((x) => x.id === s.id);
   }
@@ -440,6 +470,7 @@ export class AttendanceService {
       exportedAt: this.nowIso(),
       institute: this.rawSettings().instituteName,
       parent: { name: first.parent_name, phone },
+      secondGuardian: first.guardian2_phone ? { name: first.guardian2_name, phone: first.guardian2_phone } : null,
       students: children.map((c) => ({
         name: c.name,
         batch: c.batch_name,
@@ -461,7 +492,9 @@ export class AttendanceService {
           )
           .all(c.id),
       })),
-      whatsappMessages: this.db.prepare('SELECT direction, body, created_at AS at, error FROM messages WHERE phone = ? ORDER BY id').all(phone),
+      whatsappMessages: this.db
+        .prepare('SELECT phone, direction, body, created_at AS at, error FROM messages WHERE phone IN (?, ?) ORDER BY id')
+        .all(phone, first.guardian2_phone ?? phone),
       consent: this.consentFor(phone),
       consentHistory: this.db.prepare('SELECT status, source, wording, recorded_by AS recordedBy, at FROM consent_log WHERE phone = ? ORDER BY id').all(phone),
     };
@@ -514,13 +547,18 @@ export class AttendanceService {
       counts.attendance = run('DELETE FROM attendance WHERE student_id = ?', id);
       run('DELETE FROM events WHERE student_id = ?', id);
       run('DELETE FROM students WHERE id = ?', id);
-      const siblings = this.db.prepare('SELECT COUNT(*) AS n FROM students WHERE parent_phone = ?').get(st.parent_phone).n;
       counts.messages = 0;
-      if (!siblings) {
-        counts.messages = run('DELETE FROM messages WHERE phone = ?', st.parent_phone);
-        run('DELETE FROM consent_log WHERE phone = ?', st.parent_phone);
-        run("DELETE FROM consents WHERE phone = ? AND status != 'opted_out'", st.parent_phone);
-        run("UPDATE consents SET wording = NULL, recorded_by = NULL WHERE phone = ?", st.parent_phone);
+      let siblings = 0;
+      for (const phone of [st.parent_phone, st.guardian2_phone].filter(Boolean)) {
+        const others = this.db.prepare('SELECT COUNT(*) AS n FROM students WHERE parent_phone = ? OR guardian2_phone = ?').get(phone, phone).n;
+        if (others) {
+          siblings += others;
+          continue;
+        }
+        counts.messages += run('DELETE FROM messages WHERE phone = ?', phone);
+        run('DELETE FROM consent_log WHERE phone = ?', phone);
+        run("DELETE FROM consents WHERE phone = ? AND status != 'opted_out'", phone);
+        run('UPDATE consents SET wording = NULL, recorded_by = NULL WHERE phone = ?', phone);
       }
       this.logPrivacy(
         actor,
@@ -664,63 +702,90 @@ export class AttendanceService {
 
     const verified = { ...session, verified_at: at };
     this.event('class_verified', { sessionId: session.id, data: { absent: absentees.length } });
-    await mapLimit(absentees, 8, (student) => this.sendAlert(verified, student));
+    // Siblings on the same number get one message naming them all, not one message each.
+    const families = new Map();
+    for (const st of absentees) families.set(st.parent_phone, [...(families.get(st.parent_phone) ?? []), st]);
+    await mapLimit([...families.values()], 8, (children) => this.sendAlertGroup(verified, children));
     this.changed();
   }
 
   async sendAlert(session, student) {
+    return this.sendAlertGroup(session, [student]);
+  }
+
+  /** Why WhatsApp may not be used for this number, or null if it may. */
+  consentBlock(phone) {
+    const consent = this.consentFor(phone);
+    if (consent?.status === 'opted_out') return { reason: 'stop', text: 'Parent replied STOP to WhatsApp alerts' };
+    if (this.rawSettings().requireConsent !== '0' && consent?.status !== 'opted_in') return { reason: 'no_consent', text: 'No WhatsApp consent recorded for this parent yet' };
+    return null;
+  }
+
+  /**
+   * Alert the family of one or more absent students (siblings on the same number, same class).
+   * Each student gets their own alert record; the parents get one message. It goes to the main
+   * number and to the second guardian, each only if they agreed to WhatsApp.
+   */
+  async sendAlertGroup(session, students) {
     const batch = this.db.prepare('SELECT * FROM batches WHERE id = ?').get(session.batch_id);
-    const r = this.db
-      .prepare("INSERT OR IGNORE INTO alerts (session_id, student_id, phone, status, sent_at) VALUES (?, ?, ?, 'sent', ?)")
-      .run(session.id, student.id, student.parent_phone, this.nowIso());
-    if (!r.changes) return; // one alert per student per session
-    const alertId = Number(r.lastInsertRowid);
+    const sentAt = this.nowIso();
+    const fresh = [];
+    for (const st of students) {
+      const r = this.db
+        .prepare("INSERT OR IGNORE INTO alerts (session_id, student_id, phone, status, sent_at) VALUES (?, ?, ?, 'sent', ?)")
+        .run(session.id, st.id, st.parent_phone, sentAt);
+      if (r.changes) fresh.push({ student: st, alertId: Number(r.lastInsertRowid) }); // one alert per student per class
+    }
+    if (!fresh.length) return;
+    const ids = fresh.map((f) => f.alertId);
+    const first = fresh[0].student;
+
+    const recipients = [{ phone: first.parent_phone, name: first.parent_name || 'Parent', primary: true }];
+    const g2 = fresh.map((f) => f.student).find((st) => st.guardian2_phone);
+    if (g2 && g2.guardian2_phone !== first.parent_phone) recipients.push({ phone: g2.guardian2_phone, name: g2.guardian2_name || 'Parent', primary: false });
+    const allowed = recipients.filter((r) => !(r.block = this.consentBlock(r.phone)));
 
     // No WhatsApp without consent: the absence still reaches the parent, by a phone call.
-    const consent = this.consentFor(student.parent_phone);
-    const blocked =
-      consent?.status === 'opted_out'
-        ? 'Parent replied STOP to WhatsApp alerts'
-        : this.rawSettings().requireConsent !== '0' && consent?.status !== 'opted_in'
-          ? 'No WhatsApp consent recorded for this parent yet'
-          : null;
-    if (blocked) {
-      this.event('alert_blocked', { sessionId: session.id, studentId: student.id, alertId, data: { reason: consent?.status === 'opted_out' ? 'stop' : 'no_consent' } });
-      this.db.prepare("UPDATE alerts SET status = 'failed', error = ? WHERE id = ?").run(blocked, alertId);
-      this.createTask(alertId, `Call instead: ${blocked.charAt(0).toLowerCase()}${blocked.slice(1)}`);
+    if (!allowed.length) {
+      const block = recipients[0].block;
+      for (const { student, alertId } of fresh) {
+        this.event('alert_blocked', { sessionId: session.id, studentId: student.id, alertId, data: { reason: block.reason } });
+        this.db.prepare("UPDATE alerts SET status = 'failed', error = ? WHERE id = ?").run(block.text, alertId);
+        this.createTask(alertId, `Call instead: ${block.text.charAt(0).toLowerCase()}${block.text.slice(1)}`);
+      }
       return;
     }
 
     const time = formatTime(this.tz, session.starts_at);
-    const parentName = student.parent_name || 'Parent';
-    const text = renderTemplate(this.rawSettings().alertTemplate, {
-      parent: parentName,
-      student: student.name,
-      batch: batch.name,
-      time,
-      institute: this.rawSettings().instituteName,
-    });
-    const buttons = Object.entries(REPLY_OPTIONS).map(([key, o]) => ({ id: `${key}:${alertId}`, title: o.title }));
-
-    const msg = this.logMessage({ phone: student.parent_phone, direction: 'out', body: text, buttons, alertId });
-    try {
-      const { id } = await this.messenger.send({
-        to: student.parent_phone,
-        text,
-        buttons,
-        template: 'alert',
-        params: [parentName, batch.name, time, student.name],
-      });
-      this.markSent(msg, id);
-      this.db.prepare("UPDATE alerts SET delivery = 'sent' WHERE id = ?").run(alertId);
-      this.event('alert_sent', { sessionId: session.id, studentId: student.id, alertId, data: { minutesAfterStart: Math.round((this.now() - Date.parse(session.starts_at)) / 6000) / 10 } });
-    } catch (err) {
-      this.logger.error?.(`WhatsApp alert ${alertId} failed: ${err.message}`);
-      this.event('alert_failed', { sessionId: session.id, studentId: student.id, alertId, data: { code: err.code ?? null } });
-      this.db.prepare("UPDATE alerts SET status = 'failed', error = ? WHERE id = ?").run(err.message, alertId);
-      this.db.prepare('UPDATE messages SET error = ? WHERE id = ?').run(err.message, msg);
-      // The parent still needs to know: hand it to staff straight away.
-      this.createTask(alertId, 'WhatsApp message failed');
+    const names = joinNames(fresh.map((f) => f.student.name));
+    const buttons = Object.entries(REPLY_OPTIONS).map(([key, o]) => ({ id: `${key}:${ids.join(',')}`, title: o.title }));
+    let delivered = 0;
+    let lastError = null;
+    for (const r of allowed) {
+      const text = renderTemplate(this.rawSettings().alertTemplate, { parent: r.name, student: names, batch: batch.name, time, institute: this.rawSettings().instituteName });
+      const msg = this.logMessage({ phone: r.phone, direction: 'out', body: text, buttons, alertId: ids[0] });
+      try {
+        const { id } = await this.messenger.send({ to: r.phone, text, buttons, template: 'alert', params: [r.name, batch.name, time, names] });
+        this.markSent(msg, id);
+        delivered += 1;
+        if (!r.primary) this.db.prepare(`UPDATE alerts SET phone2 = ? WHERE id IN (${ids.map(() => '?').join(',')})`).run(r.phone, ...ids);
+      } catch (err) {
+        lastError = err;
+        this.logger.error?.(`WhatsApp alert ${ids.join(',')} to a parent failed: ${err.message}`);
+        this.db.prepare("UPDATE messages SET error = ?, status = 'failed' WHERE id = ?").run(err.message, msg);
+      }
+    }
+    const minutes = Math.round((this.now() - Date.parse(session.starts_at)) / 6000) / 10;
+    for (const { student, alertId } of fresh) {
+      if (delivered) {
+        this.db.prepare("UPDATE alerts SET delivery = 'sent' WHERE id = ?").run(alertId);
+        this.event('alert_sent', { sessionId: session.id, studentId: student.id, alertId, data: { minutesAfterStart: minutes, recipients: delivered, siblings: fresh.length } });
+      } else {
+        this.event('alert_failed', { sessionId: session.id, studentId: student.id, alertId, data: { code: lastError?.code ?? null } });
+        this.db.prepare("UPDATE alerts SET status = 'failed', error = ? WHERE id = ?").run(lastError?.message ?? 'Send failed', alertId);
+        // The parent still needs to know: hand it to staff straight away.
+        this.createTask(alertId, 'WhatsApp message failed');
+      }
     }
   }
 
@@ -740,29 +805,28 @@ export class AttendanceService {
     let alert = null;
     let choice = null;
 
-    const m = new RegExp(`^(${REPLY_KEYS}):(\\d+)$`).exec(String(payload ?? ''));
+    let alerts = [];
+    const m = new RegExp(`^(${REPLY_KEYS}):(\\d+(?:,\\d+)*)$`).exec(String(payload ?? ''));
     if (m) {
       choice = m[1];
-      // Only today's alerts: an old button tapped days later must not rewrite history.
-      alert =
-        this.db
-          .prepare(
-            `SELECT al.* FROM alerts al JOIN sessions se ON se.id = al.session_id
-              WHERE al.id = ? AND al.phone = ? AND se.date = ?`,
-          )
-          .get(Number(m[2]), from, this.today()) ?? null;
+      const ids = m[2].split(',').map(Number).slice(0, 10);
+      // Only today's alerts, and only for this parent: an old button tapped days later must not rewrite history.
+      alerts = this.db
+        .prepare(
+          `SELECT al.* FROM alerts al JOIN sessions se ON se.id = al.session_id
+            WHERE al.id IN (${ids.map(() => '?').join(',')}) AND (al.phone = ? OR al.phone2 = ?) AND se.date = ?`,
+        )
+        .all(...ids, from, from, this.today());
     }
     if (!choice) choice = parseReplyText(text || payload);
-    if (!alert && choice) {
-      // Free text: apply it to this parent's latest open alert from today.
-      alert =
-        this.db
-          .prepare(
-            `SELECT al.* FROM alerts al JOIN sessions se ON se.id = al.session_id
-              WHERE al.phone = ? AND se.date = ? ORDER BY al.id DESC LIMIT 1`,
-          )
-          .get(from, this.today()) ?? null;
+    if (!alerts.length && choice) {
+      // Free text ("aaj chutti hai"): it answers every child of this family still waiting today,
+      // or else the latest alert.
+      const mine = `SELECT al.* FROM alerts al JOIN sessions se ON se.id = al.session_id WHERE (al.phone = ? OR al.phone2 = ?) AND se.date = ?`;
+      alerts = this.db.prepare(`${mine} AND al.status = 'sent' ORDER BY al.id`).all(from, from, this.today());
+      if (!alerts.length) alerts = this.db.prepare(`${mine} ORDER BY al.id DESC LIMIT 1`).all(from, from, this.today());
     }
+    alert = alerts[0] ?? null;
 
     try {
       this.logMessage({ phone: from, direction: 'in', body: String(text || payload || '').slice(0, 1000), alertId: alert?.id ?? null, wamid: id });
@@ -776,37 +840,34 @@ export class AttendanceService {
       return { matched: false };
     }
 
-    // Once staff have called and logged an outcome, a later message doesn't overwrite it;
-    // it stays visible in the WhatsApp log for the front desk.
-    const current = this.db
-      .prepare('SELECT source FROM attendance WHERE session_id = ? AND student_id = ?')
-      .get(alert.session_id, alert.student_id);
-    if (current?.source === 'staff') {
-      this.changed();
-      return { matched: false, reason: 'staff-outcome' };
-    }
-
     const option = REPLY_OPTIONS[choice];
     const at = this.nowIso();
-    this.db
-      .prepare("UPDATE alerts SET status = 'replied', reply = ?, replied_at = ? WHERE id = ?")
-      .run(choice, at, alert.id);
-    this.event('reply_received', {
-      sessionId: alert.session_id,
-      studentId: alert.student_id,
-      alertId: alert.id,
-      data: { choice, minutesAfterAlert: Math.round((Date.parse(at) - Date.parse(alert.sent_at)) / 6000) / 10 },
-    });
-    this.db
-      .prepare(
-        `UPDATE attendance SET status = ?, note = ?, source = 'parent', updated_at = ?
-          WHERE session_id = ? AND student_id = ?`,
-      )
-      .run(option.status, option.note, at, alert.session_id, alert.student_id);
-    if (option.urgent) {
-      this.createTask(alert.id, "URGENT: parent doesn't know where the child is", { urgent: true });
-    } else {
-      this.closeTaskFor(alert.session_id, alert.student_id, `Parent replied: ${option.title}`);
+    const applied = [];
+    for (const al of alerts) {
+      // Once staff have called and logged an outcome, a later message doesn't overwrite it;
+      // it stays visible in the WhatsApp log for the front desk.
+      const current = this.db.prepare('SELECT source FROM attendance WHERE session_id = ? AND student_id = ?').get(al.session_id, al.student_id);
+      if (current?.source === 'staff') continue;
+      this.db.prepare("UPDATE alerts SET status = 'replied', reply = ?, replied_at = ? WHERE id = ?").run(choice, at, al.id);
+      this.event('reply_received', {
+        sessionId: al.session_id,
+        studentId: al.student_id,
+        alertId: al.id,
+        data: { choice, minutesAfterAlert: Math.round((Date.parse(at) - Date.parse(al.sent_at)) / 6000) / 10, guardian: al.phone2 === from ? 2 : 1 },
+      });
+      this.db
+        .prepare(
+          `UPDATE attendance SET status = ?, note = ?, source = 'parent', updated_at = ?
+            WHERE session_id = ? AND student_id = ?`,
+        )
+        .run(option.status, option.note, at, al.session_id, al.student_id);
+      if (option.urgent) this.createTask(al.id, "URGENT: parent doesn't know where the child is", { urgent: true });
+      else this.closeTaskFor(al.session_id, al.student_id, `Parent replied: ${option.title}`);
+      applied.push(al.id);
+    }
+    if (!applied.length) {
+      this.changed();
+      return { matched: false, reason: 'staff-outcome' };
     }
 
     const ack = option.ack ?? `Thank you. Noted: ${option.title}.`;
@@ -820,7 +881,7 @@ export class AttendanceService {
     }
 
     this.changed();
-    return { matched: true, alertId: alert.id, choice };
+    return { matched: true, alertId: applied[0], alertIds: applied, choice };
   }
 
   // ---------------------------------------------------- consent (opt-in)
@@ -855,6 +916,10 @@ export class AttendanceService {
       throw new HttpError(409, 'This parent sent STOP. Only they can turn alerts back on, by sending START.');
     }
     this.setConsent(st.parent_phone, 'opted_in', { source: 'staff', recordedBy });
+    // The admission form lists both parents' numbers; a second guardian who sent STOP stays out.
+    if (st.guardian2_phone && this.consentFor(st.guardian2_phone)?.status !== 'opted_out') {
+      this.setConsent(st.guardian2_phone, 'opted_in', { source: 'staff', recordedBy });
+    }
     return this.consentFor(st.parent_phone);
   }
 
@@ -877,11 +942,12 @@ export class AttendanceService {
   recordAllConsents({ batchId = null, recordedBy = null } = {}) {
     const phones = this.db
       .prepare(
-        `SELECT DISTINCT st.parent_phone AS phone FROM students st
-          WHERE st.active = 1 AND (? IS NULL OR st.batch_id = ?)
-            AND NOT EXISTS (SELECT 1 FROM consents c WHERE c.phone = st.parent_phone)`,
+        `SELECT DISTINCT phone FROM (
+            SELECT st.parent_phone AS phone FROM students st WHERE st.active = 1 AND (? IS NULL OR st.batch_id = ?)
+            UNION SELECT st.guardian2_phone FROM students st WHERE st.active = 1 AND st.guardian2_phone IS NOT NULL AND (? IS NULL OR st.batch_id = ?)
+          ) p WHERE NOT EXISTS (SELECT 1 FROM consents c WHERE c.phone = p.phone)`,
       )
-      .all(batchId, batchId);
+      .all(batchId, batchId, batchId, batchId);
     for (const { phone } of phones) this.setConsent(phone, 'opted_in', { source: 'staff', recordedBy });
     return { recorded: phones.length };
   }
@@ -894,8 +960,8 @@ export class AttendanceService {
     if (!optOut && !optIn) return null;
 
     const children = this.db
-      .prepare('SELECT name FROM students WHERE parent_phone = ? AND active = 1 ORDER BY name')
-      .all(from)
+      .prepare('SELECT name FROM students WHERE (parent_phone = ? OR guardian2_phone = ?) AND active = 1 ORDER BY name')
+      .all(from, from)
       .map((r) => r.name.split(' ')[0]);
     const institute = this.rawSettings().instituteName;
     try {
@@ -1203,12 +1269,26 @@ export class AttendanceService {
 
     // The absence alert itself (acknowledgements carry no buttons).
     if (msg.alert_id && msg.buttons) {
-      this.db.prepare('UPDATE alerts SET delivery = ? WHERE id = ?').run(status, msg.alert_id);
-      if (status === 'failed') {
-        const r = this.db
-          .prepare("UPDATE alerts SET status = 'failed', error = ? WHERE id = ? AND status = 'sent'")
-          .run(reason ?? 'Delivery failed', msg.alert_id);
-        if (r.changes) this.createTask(msg.alert_id, `WhatsApp couldn't deliver: ${reason ?? 'unknown reason'}`);
+      const ids = alertIdsOf(msg) ?? [msg.alert_id];
+      const inIds = `(${ids.map(() => '?').join(',')})`;
+      if (status !== 'failed') {
+        // Best status across the guardians' messages wins: never move "read" back to "delivered".
+        for (const aid of ids) {
+          const cur = this.db.prepare('SELECT delivery FROM alerts WHERE id = ?').get(aid)?.delivery;
+          if ((DELIVERY_RANK[cur] ?? 0) < DELIVERY_RANK[status]) this.db.prepare('UPDATE alerts SET delivery = ? WHERE id = ?').run(status, aid);
+        }
+      } else {
+        // Failed for this number. If another guardian got the message, the parents still know.
+        const others = this.db
+          .prepare("SELECT COUNT(*) AS n FROM messages WHERE alert_id = ? AND direction = 'out' AND buttons IS NOT NULL AND id != ? AND (status IS NULL OR status != 'failed')")
+          .get(msg.alert_id, msg.id).n;
+        if (!others) {
+          this.db.prepare(`UPDATE alerts SET delivery = 'failed' WHERE id IN ${inIds}`).run(...ids);
+          for (const aid of ids) {
+            const r = this.db.prepare("UPDATE alerts SET status = 'failed', error = ? WHERE id = ? AND status = 'sent'").run(reason ?? 'Delivery failed', aid);
+            if (r.changes) this.createTask(aid, `WhatsApp couldn't deliver: ${reason ?? 'unknown reason'}`);
+          }
+        }
       }
     }
     this.changed();
@@ -1220,8 +1300,9 @@ export class AttendanceService {
     return this.db
       .prepare(
         `SELECT t.phone, t.count, m.body AS lastBody, m.created_at AS lastAt,
-                (SELECT group_concat(name, ', ') FROM (SELECT DISTINCT name FROM students WHERE parent_phone = t.phone AND active = 1)) AS students,
-                (SELECT parent_name FROM students WHERE parent_phone = t.phone AND parent_name IS NOT NULL LIMIT 1) AS parentName
+                (SELECT group_concat(name, ', ') FROM (SELECT DISTINCT name FROM students WHERE (parent_phone = t.phone OR guardian2_phone = t.phone) AND active = 1)) AS students,
+                COALESCE((SELECT parent_name FROM students WHERE parent_phone = t.phone AND parent_name IS NOT NULL LIMIT 1),
+                         (SELECT guardian2_name FROM students WHERE guardian2_phone = t.phone AND guardian2_name IS NOT NULL LIMIT 1)) AS parentName
            FROM (SELECT phone, MAX(id) AS lastId, COUNT(*) AS count FROM messages GROUP BY phone) t
            JOIN messages m ON m.id = t.lastId
           ORDER BY t.lastId DESC`,
@@ -1370,7 +1451,10 @@ export class AttendanceService {
       name: st.name,
       parentName: st.parent_name,
       parentPhone: st.parent_phone,
+      guardian2Name: st.guardian2_name,
+      guardian2Phone: st.guardian2_phone,
       consent: this.consentFor(st.parent_phone),
+      consent2: st.guardian2_phone ? this.consentFor(st.guardian2_phone) : null,
       consentLog: this.db
         .prepare('SELECT status, source, wording, recorded_by AS recordedBy, at FROM consent_log WHERE phone = ? ORDER BY id DESC LIMIT 10')
         .all(st.parent_phone),
@@ -1403,16 +1487,20 @@ export class AttendanceService {
 
     const rows = lines.map(({ text, line }) => {
       const cols = text.split(text.includes('\t') ? '\t' : ',').map((c) => c.trim().replace(/^"|"$/g, ''));
-      const [name, parentName = '', phone = '', batchName = ''] = cols;
-      const row = { line, name, parentName, phone, batchName: batchName || fallback?.name || '', error: null };
+      // Optional 5th and 6th columns: a second parent / guardian and their WhatsApp number.
+      const [name, parentName = '', phone = '', batchName = '', guardian2Name = '', guardian2Phone = ''] = cols;
+      const row = { line, name, parentName, phone, batchName: batchName || fallback?.name || '', guardian2Name, guardian2Phone, error: null };
       const batch = batchName ? batches.find((b) => b.name.toLowerCase() === batchName.toLowerCase()) : fallback;
       if (!name) row.error = 'Missing student name';
       else if (!batch) row.error = batchName ? `No batch called "${batchName}"` : 'Pick a batch';
       else {
         const p = normalizePhone(phone);
+        const g2 = guardian2Phone ? normalizePhone(guardian2Phone) : '';
         if (p.length < 11 || p.length > 15) row.error = 'Invalid phone number';
+        else if (g2 && (g2.length < 11 || g2.length > 15 || g2 === p)) row.error = "Invalid second guardian's number";
         else {
           row.phone = p;
+          row.guardian2Phone = g2 || null;
           row.batchId = batch.id;
           row.batchName = batch.name;
         }
@@ -1422,12 +1510,12 @@ export class AttendanceService {
 
     let added = 0;
     if (!dryRun) {
-      const insert = this.db.prepare('INSERT INTO students (batch_id, name, parent_name, parent_phone) VALUES (?, ?, ?, ?)');
+      const insert = this.db.prepare('INSERT INTO students (batch_id, name, parent_name, parent_phone, guardian2_name, guardian2_phone) VALUES (?, ?, ?, ?, ?, ?)');
       this.db.exec('BEGIN');
       try {
         for (const r of rows) {
           if (r.error) continue;
-          insert.run(r.batchId, r.name.slice(0, 80), r.parentName.slice(0, 80) || null, r.phone);
+          insert.run(r.batchId, r.name.slice(0, 80), r.parentName.slice(0, 80) || null, r.phone, r.guardian2Phone ? r.guardian2Name.slice(0, 80) || null : null, r.guardian2Phone);
           added++;
         }
         this.db.exec('COMMIT');

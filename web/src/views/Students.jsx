@@ -21,6 +21,13 @@ function StudentForm({ initial, batches, onSave, onCancel, saveLabel = 'Save' })
         <label className="field">Parent name<input className="input" value={f.parentName ?? ''} onChange={set('parentName')} placeholder="e.g. Mr. Verma" /></label>
         <label className="field">Parent WhatsApp<input className="input" inputMode="tel" value={f.parentPhone} onChange={set('parentPhone')} required placeholder="98765 43210" /></label>
       </div>
+      <details className="tech" open={Boolean(f.guardian2Phone) || undefined}>
+        <summary>Second parent or guardian <span className="muted small">optional: they get the alerts too</span></summary>
+        <div className="grid2" style={{ marginTop: 12 }}>
+          <label className="field">Name<input className="input" value={f.guardian2Name ?? ''} onChange={set('guardian2Name')} placeholder="e.g. Mrs. Verma" /></label>
+          <label className="field">WhatsApp<input className="input" inputMode="tel" value={f.guardian2Phone ?? ''} onChange={set('guardian2Phone')} placeholder="98765 43210" /></label>
+        </div>
+      </details>
       <div className="row" style={{ justifyContent: 'flex-end' }}>
         {onCancel && <button type="button" className="btn ghost" onClick={onCancel}>Cancel</button>}
         <button className="btn primary">{saveLabel}</button>
@@ -111,6 +118,19 @@ function Profile({ id, batches, onClose }) {
                 <a className="btn small ghost" href={`https://wa.me/${p.parentPhone}`} target="_blank" rel="noreferrer"><Icon name="chat" /> WhatsApp</a>
               </div>
             </div>
+            {p.guardian2Phone && (
+              <div className="row between" style={{ borderTop: '1px solid var(--line)', paddingTop: 10 }}>
+                <div>
+                  <div className="eyebrow">Second parent / guardian</div>
+                  <b>{p.guardian2Name || 'Guardian'}</b> <span className="muted small">{fmtPhone(p.guardian2Phone)}</span>{' '}
+                  <ConsentChip status={p.consent2?.status} />
+                </div>
+                <div className="row">
+                  <a className="btn small ghost" href={`tel:+${p.guardian2Phone}`}><Icon name="phone" /> Call</a>
+                  <a className="btn small ghost" href={`https://wa.me/${p.guardian2Phone}`} target="_blank" rel="noreferrer"><Icon name="chat" /> WhatsApp</a>
+                </div>
+              </div>
+            )}
           </section>
 
           <ConsentCard p={p} onAction={consentAction} />
@@ -161,7 +181,7 @@ function Profile({ id, batches, onClose }) {
           <section className="card">
             {editing ? (
               <StudentForm
-                initial={{ name: p.name, parentName: p.parentName ?? '', parentPhone: p.parentPhone, batchId: p.batch.id }}
+                initial={{ name: p.name, parentName: p.parentName ?? '', parentPhone: p.parentPhone, guardian2Name: p.guardian2Name ?? '', guardian2Phone: p.guardian2Phone ?? '', batchId: p.batch.id }}
                 batches={batches}
                 onSave={save}
                 onCancel={() => setEditing(false)}
@@ -275,7 +295,7 @@ function Import({ batches, onClose }) {
       <div className="stack">
         <p className="muted small">
           Paste from Excel / Google Sheets, or upload a CSV. One student per line: <b>name, parent name, phone, batch</b>. The batch column is optional;
-          rows without it go into the batch you pick below.
+          rows without it go into the batch you pick below. Two more optional columns add a second parent: <b>their name, their phone</b>.
         </p>
         <textarea className="textarea" style={{ minHeight: 160, fontFamily: 'ui-monospace, monospace', fontSize: 14 }} value={csv} onChange={(e) => { setCsv(e.target.value); setPreview(null); }} placeholder={'Aarav Sharma, Mr. Sharma, 98765 43210, Class 10 · Batch B\nDiya Iyer, Mrs. Iyer, 98765 43211'} />
         <div className="row">
@@ -471,7 +491,7 @@ export default function Students() {
 
       {adding && batches && (
         <Modal title="Add a student" onClose={() => setAdding(false)}>
-          <StudentForm initial={{ name: '', parentName: '', parentPhone: '', batchId: batch || batches[0]?.id }} batches={batches} onSave={add} onCancel={() => setAdding(false)} saveLabel="Add student" />
+          <StudentForm initial={{ name: '', parentName: '', parentPhone: '', guardian2Name: '', guardian2Phone: '', batchId: batch || batches[0]?.id }} batches={batches} onSave={add} onCancel={() => setAdding(false)} saveLabel="Add student" />
         </Modal>
       )}
       {importing && batches && <Import batches={batches} onClose={() => setImporting(false)} />}

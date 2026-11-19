@@ -607,3 +607,70 @@ test('loop metrics: covered absences and guardrails count what really happened',
   const m2 = service.getLoopMetrics({ from: service.today(), to: service.today() });
   assert.deepEqual([m2.absences, m2.covered, m2.coveredPct, m2.onTimeMarking.pct], [1, 1, 100, 100]);
 });
+
+test('second guardian and siblings: both parents told, siblings get one message, either can answer', async () => {
+  const t = setup();
+  const { service, ids } = t;
+  // Aarav has a second guardian who also agreed to WhatsApp; Diya's sibling Dev shares her parent's number.
+  service.updateStudent(ids.Aarav, { guardian2Name: 'Aarav mother', guardian2Phone: '9100000001' });
+  const dev = service.createStudent({ batchId: t.batch.id, name: 'Dev', parentName: 'Diya parent', parentPhone: '9000000002' });
+  service.recordConsent(ids.Aarav, { recordedBy: 'test' }); // the form lists both numbers
+  assert.throws(() => service.updateStudent(ids.Rohan, { guardian2Phone: '9000000003' }), /same as the first/);
+
+  for (const id of [ids.Aarav, ids.Diya, dev.id]) await service.mark(t.session.id, id, 'A');
+  await service.submit(t.session.id);
+  t.advance(15 * 60_000);
+  await service.tick();
+
+  const toAarav = t.sent.filter((m) => m.buttons && m.params?.[3] === 'Aarav');
+  assert.deepEqual(toAarav.map((m) => m.to).sort(), ['919000000001', '919100000001'], 'both guardians messaged');
+  assert.deepEqual(toAarav.map((m) => m.params[0]).sort(), ['Aarav mother', 'Aarav parent']);
+  const toDiya = t.sent.filter((m) => m.to === '919000000002' && m.buttons);
+  assert.equal(toDiya.length, 1, 'one message for both siblings');
+  assert.equal(toDiya[0].params[3], 'Dev & Diya');
+  assert.match(toDiya[0].buttons[0].id, /^LEAVE:\d+,\d+$/);
+
+  // The second guardian answers with the button: Aarav is on leave.
+  const r = await service.handleReply({ phone: '9100000001', payload: toAarav[0].buttons[0].id });
+  assert.equal(r.matched, true);
+  assert.equal(t.student('Aarav').status, 'L');
+  assert.equal(t.sent.at(-1).to, '919100000001', 'thank-you goes to whoever replied');
+
+  // One tap answers for both siblings.
+  await service.handleReply({ phone: '9000000002', payload: toDiya[0].buttons[1].id }); // LATE
+  assert.equal(t.student('Diya').status, 'T');
+  assert.equal(t.student('Dev').status, 'T');
+  // A stranger can't use those buttons.
+  assert.equal((await service.handleReply({ phone: '9555555555', payload: toDiya[0].buttons[0].id })).matched, false);
+
+  // Next day: the first number sends STOP. The second guardian still gets told, so it's not a call.
+  await service.handleReply({ phone: '9000000001', text: 'STOP' });
+  const before = t.sent.length;
+  t.advance(24 * 60 * 60_000);
+  const s2 = service.ensureSession(t.batch.id);
+  t.advance(-15 * 60_000);
+  await service.mark(s2.id, ids.Aarav, 'A');
+  await service.submit(s2.id);
+  t.advance(15 * 60_000);
+  await service.tick();
+  const day2 = service.getSessionView(s2.id).students.find((s) => s.name === 'Aarav').alert;
+  assert.equal(day2.status, 'sent');
+  assert.deepEqual(t.sent.slice(before).filter((m) => m.buttons).map((m) => m.to), ['919100000001'], 'only the second guardian');
+
+  // WhatsApp can't deliver to one number but the other got it: the parents know, no call needed.
+  service.handleStatus({ id: 'wamid.unknown', status: 'failed' }); // ignored
+  const aaravAlert = service.getSessionView(t.session.id).students.find((s) => s.name === 'Aarav').alert.id;
+  const msgs = service.db.prepare("SELECT * FROM messages WHERE alert_id = ? AND direction = 'out' AND buttons IS NOT NULL").all(aaravAlert);
+  assert.equal(msgs.length, 2);
+  service.handleStatus({ id: msgs[0].wamid, status: 'delivered' });
+  service.handleStatus({ id: msgs[1].wamid, status: 'failed', error: { code: 131026 } });
+  const aarav1 = service.getSessionView(t.session.id).students.find((s) => s.name === 'Aarav').alert;
+  assert.equal(aarav1.status, 'replied');
+  assert.equal(aarav1.delivery, 'delivered');
+
+  // Import: optional 5th/6th columns add a second guardian.
+  const imp = service.importStudents({ csv: 'Kiran, Mr K, 9200000001, Batch B, Mrs K, 9200000002', batchId: t.batch.id });
+  assert.equal(imp.added, 1);
+  const kiran = service.listStudents().find((s) => s.name === 'Kiran');
+  assert.equal(kiran.guardian2Phone, '919200000002');
+});

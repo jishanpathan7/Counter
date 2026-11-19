@@ -184,6 +184,14 @@ export function seedDemo(platform) {
   const phoneOf = (name) => bf.listStudents().find((x) => x.name === name).parentPhone;
   for (const t of ['consents', 'consent_log']) bf.db.prepare(`DELETE FROM ${t} WHERE phone = ?`).run(phoneOf('Sara Ali'));
   bf.setConsent(phoneOf('Nisha Pillai'), 'opted_out', { source: 'whatsapp' });
+  // Two families where both parents get the alerts.
+  for (const [name, g2, phone] of [['Aarav Sharma', 'Mrs. Sharma', '9000020001'], ['Ishaan Patel', 'Mrs. Patel', '9000020002']]) {
+    const st = bf.listStudents().find((x) => x.name === name);
+    if (st) {
+      bf.updateStudent(st.id, { guardian2Name: g2, guardian2Phone: phone });
+      bf.setConsent(phone, 'opted_in', { source: 'staff', recordedBy: 'Admission desk' });
+    }
+  }
   bf.updateWhatsAppConfig({ displayPhone: '919999988888' }); // demo number for the "send START" link
   platform.addMember('bright-future', { name: 'Pooja Desai', phone: '9999900002', pin: DEMO_PIN, role: 'staff' });
   platform.addMember('bright-future', { name: 'Anil Sir', phone: '9999900003', pin: DEMO_PIN, role: 'teacher', batchIds: [batches[1].id, batches[2].id] });
