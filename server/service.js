@@ -19,7 +19,13 @@ const DEFAULT_SETTINGS = {
   digestTime: '20:00',
   ownerPhone: '',
   requireConsent: '1', // only message parents who agreed; others become a call task
+  retentionMessagesMonths: '12', // WhatsApp messages are deleted after this many months
+  retentionRemovedMonths: '12', // removed students are erased this long after removal (0 = keep)
 };
+// Fixed parts of the clean-up: messages from numbers that aren't parents, and the activity log
+// (kept a year: CERT-In asks for at least 180 days of logs).
+export const RETENTION_FIXED = { unknownNumberDays: 30, eventsMonths: 12 };
+const RETENTION_CHOICES = { retentionMessagesMonths: [6, 12, 24], retentionRemovedMonths: [0, 6, 12, 24] };
 
 export const CONSENT_WORDING = {
   whatsapp: 'Parent sent START to receive attendance alerts on WhatsApp',
@@ -104,7 +110,7 @@ function parseGuardian2(name, phone, primaryPhone) {
   return { name: String(name ?? '').trim() || null, phone: parsed };
 }
 
-const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+const plural = (n, word, many = `${word}s`) => `${n} ${n === 1 ? word : many}`;
 export const STATUS_WORDS = { P: 'present', A: 'absent', L: 'on leave', T: 'late' };
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 
@@ -214,6 +220,8 @@ export class AttendanceService {
       digestTime: s.digestTime,
       ownerPhone: s.ownerPhone,
       requireConsent: s.requireConsent !== '0',
+      retentionMessagesMonths: Number(s.retentionMessagesMonths),
+      retentionRemovedMonths: Number(s.retentionRemovedMonths),
     };
   }
 
@@ -227,6 +235,11 @@ export class AttendanceService {
     }
     if (patch.digestEnabled !== undefined) upsert.run('digestEnabled', patch.digestEnabled ? '1' : '0');
     if (patch.requireConsent !== undefined) upsert.run('requireConsent', patch.requireConsent ? '1' : '0');
+    for (const [key, allowed] of Object.entries(RETENTION_CHOICES)) {
+      if (patch[key] === undefined) continue;
+      if (!allowed.includes(Number(patch[key]))) throw new HttpError(400, `${key} must be one of ${allowed.join(', ')}`);
+      upsert.run(key, String(Number(patch[key])));
+    }
     if (patch.digestTime !== undefined) {
       if (!TIME_RE.test(String(patch.digestTime))) throw new HttpError(400, 'Summary time must be HH:MM');
       upsert.run('digestTime', patch.digestTime);
@@ -572,6 +585,55 @@ export class AttendanceService {
     }
     this.changed();
     return counts;
+  }
+
+  /** Once a day: delete what the institute no longer needs to keep. */
+  maybeApplyRetention() {
+    const today = this.today();
+    if (this.rawSettings()['retention.lastRun'] === today) return null;
+    this.setSetting('retention.lastRun', today);
+    return this.applyRetention();
+  }
+
+  /**
+   * The clean-up itself: old WhatsApp messages, messages from numbers that aren't parents, removed
+   * students past their keep period (fully erased), and the activity log older than a year.
+   * Attendance itself is kept for reports as long as the student is on the books.
+   */
+  applyRetention({ actor = 'Automatic clean-up' } = {}) {
+    const s = this.getSettings();
+    const now = this.now();
+    const monthsAgo = (m) => new Date(now - m * 30.44 * 86_400_000).toISOString();
+    const counts = { messages: 0, unknown: 0, students: 0, events: 0 };
+    counts.messages = this.db.prepare('DELETE FROM messages WHERE created_at < ?').run(monthsAgo(s.retentionMessagesMonths)).changes;
+    const owner = s.ownerPhone || '';
+    counts.unknown = this.db
+      .prepare(
+        `DELETE FROM messages WHERE created_at < ? AND phone != ?
+           AND NOT EXISTS (SELECT 1 FROM students st WHERE st.parent_phone = messages.phone OR st.guardian2_phone = messages.phone)`,
+      )
+      .run(new Date(now - RETENTION_FIXED.unknownNumberDays * 86_400_000).toISOString(), owner).changes;
+    if (s.retentionRemovedMonths > 0) {
+      const old = this.db.prepare('SELECT id FROM students WHERE active = 0 AND removed_at IS NOT NULL AND removed_at < ?').all(monthsAgo(s.retentionRemovedMonths));
+      for (const { id } of old) this.eraseStudent(id, { actor });
+      counts.students = old.length;
+    }
+    counts.events = this.db.prepare('DELETE FROM events WHERE at < ?').run(monthsAgo(RETENTION_FIXED.eventsMonths)).changes;
+    const total = counts.messages + counts.unknown + counts.students + counts.events;
+    if (total) {
+      this.logPrivacy(
+        actor,
+        'retention',
+        `${plural(counts.messages, 'old message')}, ${plural(counts.unknown, "message")} from numbers that aren't parents, ${plural(counts.students, 'removed student')} erased, ${plural(counts.events, 'old log entry', 'old log entries')}`,
+      );
+      this.changed();
+    }
+    return counts;
+  }
+
+  /** Who opened, added, changed or removed students' details (access log for the owner). */
+  accessLog(limit = 100) {
+    return this.listEvents({ types: ['student_viewed', 'student_added', 'student_edited', 'student_removed'], limit });
   }
 
   /** Erase every removed student (e.g. at the end of the academic year). */
@@ -1082,6 +1144,7 @@ export class AttendanceService {
     }
     if (escalated) this.changed();
     await this.maybeSendDigest();
+    this.maybeApplyRetention();
   }
 
   // ----------------------------------------------------------------- views

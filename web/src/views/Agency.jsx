@@ -184,6 +184,36 @@ function BillingPanel({ inst, onClose, onDone, toast }) {
   );
 }
 
+const AUTH_EVENT = { login: 'Signed in', login_failed: 'Wrong PIN', logout: 'Signed out', pin_changed: 'Changed PIN' };
+/** Sign-ins across all institutes, kept 180 days: the first place to look after a suspected break-in. */
+function AuthLog({ onClose }) {
+  const [rows, setRows] = useState(null);
+  useEffect(() => {
+    api.get('/agency/auth-log').then(setRows).catch(() => setRows([]));
+  }, []);
+  return (
+    <Modal title="Sign-in log (last 180 days)" onClose={onClose} wide>
+      {!rows ? <p className="muted">Loading…</p> : rows.length ? (
+        <div className="table-wrap">
+          <table className="table">
+            <thead><tr><th>When</th><th>Who</th><th>What</th><th>Network address</th></tr></thead>
+            <tbody>
+              {rows.map((r, i) => (
+                <tr key={i} className={r.event === 'login_failed' ? 's-A' : ''}>
+                  <td className="small">{new Date(r.at).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })}</td>
+                  <td className="small">{r.name || '—'} <span className="muted">{r.phone}</span></td>
+                  <td className="small">{AUTH_EVENT[r.event] ?? r.event}</td>
+                  <td className="small muted">{r.ip || '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : <p className="muted">Nothing yet.</p>}
+    </Modal>
+  );
+}
+
 /** The agency's own details printed on invoices. */
 function BillingProfile({ onClose, toast }) {
   const [f, setF] = useState(null);
@@ -231,6 +261,7 @@ export default function Agency({ me, logout, theme, toast }) {
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState(null);
   const [profile, setProfile] = useState(false);
+  const [authLog, setAuthLog] = useState(false);
   const load = useCallback(() => api.get('/agency/overview').then(setData).catch((e) => toast(e.message, 'bad')), [toast]);
   useEffect(() => {
     load();
@@ -279,6 +310,7 @@ export default function Agency({ me, logout, theme, toast }) {
             <p className="muted">Build once, set up for every institute. Each one gets its own team, students and WhatsApp number.</p>
           </div>
           <div className="row">
+            <button className="btn ghost" onClick={() => setAuthLog(true)}>Sign-in log</button>
             <button className="btn ghost" onClick={() => setProfile(true)}>Invoice details</button>
             <button className="btn primary" onClick={() => setAdding(true)}><Icon name="plus" /> Add institute</button>
           </div>
@@ -350,6 +382,7 @@ export default function Agency({ me, logout, theme, toast }) {
       {adding && <NewInstitute toast={toast} onClose={() => setAdding(false)} onDone={() => { setAdding(false); load(); }} />}
       {editing && <BillingPanel inst={editing} toast={toast} onClose={() => setEditing(null)} onDone={load} />}
       {profile && <BillingProfile toast={toast} onClose={() => setProfile(false)} />}
+      {authLog && <AuthLog onClose={() => setAuthLog(false)} />}
     </div>
   );
 }

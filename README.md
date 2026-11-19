@@ -128,6 +128,19 @@ answer to parents and to India's DPDP Act:
   and the logins of team members who use no other institute.
 - **Privacy log.** Every download and erasure is logged with who and when. Erased students appear by
   number, never by name.
+- **Automatic clean-up.**
+  - WhatsApp messages are deleted after 6, 12 or 24 months (12 by default).
+  - Removed students are erased 6, 12 or 24 months after removal, or kept until erased by hand.
+  - Messages from numbers that aren't parents go after 30 days.
+  - The activity log is kept a year (CERT-In asks for 180 days).
+
+  It runs daily and is recorded in the privacy log.
+- **Access log and sign-in log.** Owners see who opened, added, changed or removed each student.
+  The agency sees every sign-in, wrong PIN, sign-out and PIN change for 180 days (numbers masked).
+- **Paperwork.** [`docs/breach-response.md`](docs/breach-response.md) is the incident runbook
+  (CERT-In 6 hours, Data Protection Board 72 hours, parent notice).
+  [`docs/data-processing-agreement.md`](docs/data-processing-agreement.md) is a processor agreement
+  template between institute and agency. Both are for review by a lawyer.
 - **Encrypted credentials.** Each institute's WhatsApp access token and app secret are stored
   encrypted (AES-256-GCM). The key comes from `DATA_ENCRYPTION_KEY`, or is derived from
   `SESSION_SECRET`, and is never stored in the database or the backups. Older plain-text values

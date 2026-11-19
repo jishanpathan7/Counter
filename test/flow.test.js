@@ -674,3 +674,31 @@ test('second guardian and siblings: both parents told, siblings get one message,
   const kiran = service.listStudents().find((s) => s.name === 'Kiran');
   assert.equal(kiran.guardian2Phone, '919200000002');
 });
+
+test('retention: old messages, strangers and long-removed students are cleaned up once a day', async () => {
+  const t = setup();
+  const { service, ids } = t;
+  const at = (daysAgo) => new Date(Date.parse(service.nowIso()) - daysAgo * 86_400_000).toISOString();
+  const msg = (phone, daysAgo) => service.db.prepare("INSERT INTO messages (phone, direction, body, created_at) VALUES (?, 'in', 'hi', ?)").run(phone, at(daysAgo));
+  msg('919000000001', 400); // a parent, 13 months ago: past the 12-month default
+  msg('919000000001', 100); // a parent, recent enough: kept
+  msg('919111111111', 45); // not a parent, 45 days ago: past 30 days
+  msg('919111111111', 5); // not a parent, recent: kept for now
+  service.deleteStudent(ids.Meera);
+  service.db.prepare('UPDATE students SET removed_at = ? WHERE id = ?').run(at(400), ids.Meera);
+  service.db.prepare("INSERT INTO events (at, type) VALUES (?, 'student_viewed')").run(at(400));
+
+  const r = service.maybeApplyRetention();
+  assert.deepEqual(r, { messages: 1, unknown: 1, students: 1, events: 1 });
+  assert.equal(service.db.prepare('SELECT COUNT(*) AS n FROM messages').get().n, 2);
+  assert.equal(service.db.prepare('SELECT COUNT(*) AS n FROM students WHERE id = ?').get(ids.Meera).n, 0, 'erased, not just hidden');
+  assert.equal(service.listPrivacyLog()[0].action, 'retention');
+  assert.equal(service.maybeApplyRetention(), null, 'once a day');
+
+  // Owners choose the keep period (from a fixed set); "keep" means removed students stay.
+  assert.throws(() => service.updateSettings({ retentionMessagesMonths: 1 }), /must be one of/);
+  service.updateSettings({ retentionMessagesMonths: 24, retentionRemovedMonths: 0 });
+  service.deleteStudent(ids.Rohan);
+  service.db.prepare('UPDATE students SET removed_at = ? WHERE id = ?').run(at(900), ids.Rohan);
+  assert.equal(service.applyRetention().students, 0);
+});

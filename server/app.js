@@ -206,6 +206,7 @@ export function createApp({ platform, hub, demo = false, setupToken = null, real
   agency.patch('/institutes/:slug', (req, res) => res.json(platform.updateInstitute(req.params.slug, req.body ?? {})));
   agency.post('/institutes/:slug/delete', (req, res) => res.json(platform.deleteInstitute(req.params.slug, { confirm: req.body?.confirm, actor: req.user.name })));
   agency.get('/privacy-log', (_req, res) => res.json(platform.listPlatformPrivacyLog()));
+  agency.get('/auth-log', (_req, res) => res.json(platform.listAuthLog(200)));
   agency.get('/billing-profile', (_req, res) => res.json(platform.billingProfile()));
   agency.put('/billing-profile', (req, res) => res.json(platform.setBillingProfile(req.body ?? {})));
   agency.get('/institutes/:slug/billing', (req, res) => res.json({ ...platform.billingFor(req.params.slug), payments: platform.listPayments(req.params.slug) }));
@@ -392,7 +393,10 @@ export function createApp({ platform, hub, demo = false, setupToken = null, real
     }
     res.json(req.svc.eraseStudent(Number(req.params.id), { actor: req.user.name }));
   });
-  inst.get('/privacy', OWNER, (req, res) => res.json({ removed: req.svc.listRemovedStudents(), log: req.svc.listPrivacyLog() }));
+  inst.get('/privacy', OWNER, (req, res) =>
+    res.json({ removed: req.svc.listRemovedStudents(), log: req.svc.listPrivacyLog(), access: req.svc.accessLog(100), settings: req.svc.getSettings() }),
+  );
+  inst.post('/privacy/clean-up', OWNER, (req, res) => res.json(req.svc.applyRetention({ actor: req.user.name })));
   inst.post('/privacy/erase-removed', OWNER, (req, res) => {
     if (req.body?.confirm !== 'ERASE') throw new HttpError(400, 'Type ERASE to confirm');
     res.json(req.svc.eraseRemovedStudents({ actor: req.user.name }));

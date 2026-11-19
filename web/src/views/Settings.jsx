@@ -525,7 +525,58 @@ const PRIVACY_ACTION = {
   export_family: 'Downloaded a family\'s data',
   export_all: 'Downloaded all institute data',
   erase_student: 'Erased a student',
+  retention: 'Automatic clean-up',
 };
+const ACCESS_ACTION = { student_viewed: 'opened', student_added: 'added', student_edited: 'changed', student_removed: 'removed' };
+
+function Retention({ data, reload }) {
+  const { api, toast } = useApp();
+  if (!data) return null;
+  const s = data.settings;
+  const set = async (patch) => {
+    try {
+      await api.patch('/settings', patch);
+      toast('Saved');
+      reload();
+    } catch (e) {
+      toast(e.message, 'bad');
+    }
+  };
+  const runNow = async () => {
+    try {
+      const r = await api.post('/privacy/clean-up');
+      toast(`Cleaned up: ${r.messages + r.unknown} messages, ${r.students} students, ${r.events} log entries`);
+      reload();
+    } catch (e) {
+      toast(e.message, 'bad');
+    }
+  };
+  return (
+    <section className="card stack">
+      <div>
+        <h2>How long data is kept</h2>
+        <p className="muted small">Old data is deleted automatically once a day. Keep only what you need.</p>
+      </div>
+      <div className="grid2">
+        <label className="field">
+          WhatsApp messages
+          <select className="select" value={s.retentionMessagesMonths} onChange={(e) => set({ retentionMessagesMonths: Number(e.target.value) })}>
+            {[6, 12, 24].map((m) => <option key={m} value={m}>Delete after {m} months</option>)}
+          </select>
+        </label>
+        <label className="field">
+          Removed students
+          <select className="select" value={s.retentionRemovedMonths} onChange={(e) => set({ retentionRemovedMonths: Number(e.target.value) })}>
+            {[6, 12, 24].map((m) => <option key={m} value={m}>Erase {m} months after removal</option>)}
+            <option value={0}>Keep until erased by hand</option>
+          </select>
+        </label>
+      </div>
+      <p className="muted small">Always: messages from numbers that aren't parents are deleted after 30 days, and the activity log after a year.</p>
+      <div><button className="btn ghost small" onClick={runNow}>Clean up now</button></div>
+    </section>
+  );
+}
 
 function Privacy() {
   const { api, slug, toast } = useApp();
@@ -590,6 +641,27 @@ function Privacy() {
           </ul>
         ) : (
           <p className="muted small">No removed students are being kept.</p>
+        )}
+      </section>
+
+      <Retention data={data} reload={reload} />
+
+      <section className="card stack">
+        <div>
+          <h2>Who looked at student details</h2>
+          <p className="muted small">Every time someone opens, adds, changes or removes a student. Kept for a year.</p>
+        </div>
+        {data?.access.length ? (
+          <ul className="list">
+            {data.access.slice(0, 30).map((e, i) => (
+              <li key={i} className="list-row">
+                <span className="grow"><b>{e.actor || '—'}</b> {ACCESS_ACTION[e.type] ?? e.type} {e.studentName ? <a href={`#/students/${e.studentId}`}>{e.studentName}</a> : `student #${e.studentId}`}</span>
+                <span className="muted small">{fmtDate(e.at.slice(0, 10), { day: 'numeric', month: 'short' })} {fmtTime(e.at)}</span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="muted small">Nothing yet.</p>
         )}
       </section>
 

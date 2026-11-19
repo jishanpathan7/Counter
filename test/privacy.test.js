@@ -218,3 +218,25 @@ test('agency: deleting an institute removes its data and the accounts only it us
   // Other institutes are untouched.
   assert.equal((await agency('GET', '/api/i/excel/students')).status, 200);
 });
+
+test('access log and sign-in log: who opened what, who signed in (numbers masked)', async (tt) => {
+  const { platform, client } = await start(tt);
+  const owner = await client('9999900001');
+  const desk = await client('9999900002');
+  const bf = platform.service('bright-future');
+  const st = bf.listStudents()[0];
+  await desk('GET', `/api/i/bright-future/students/${st.id}`);
+  const { body } = await owner('GET', '/api/i/bright-future/privacy');
+  assert.equal(body.access[0].actor, 'Pooja Desai');
+  assert.equal(body.access[0].type, 'student_viewed');
+  assert.equal(body.access[0].studentName, st.name);
+  assert.equal((await desk('GET', '/api/i/bright-future/privacy')).status, 403);
+
+  platform.authLog('login_failed', { phone: '919999900003', ip: '203.0.113.5' });
+  const agency = await client('9999900000');
+  const log = (await agency('GET', '/api/agency/auth-log')).body;
+  assert.ok(log.some((l) => l.event === 'login' && l.name === 'Pooja Desai'));
+  const failed = log.find((l) => l.event === 'login_failed');
+  assert.equal(failed.phone, '91******0003', 'phone numbers masked');
+  assert.equal((await owner('GET', '/api/agency/auth-log')).status, 403);
+});

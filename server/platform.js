@@ -64,6 +64,17 @@ CREATE TABLE IF NOT EXISTS memberships (
   batch_ids    TEXT NOT NULL DEFAULT '[]',     -- teachers: the batches they take
   PRIMARY KEY (user_id, institute_id)
 );
+-- Sign-ins, sign-in failures, sign-outs and PIN changes: kept 180 days (CERT-In), for
+-- investigating a suspected break-in. Phone numbers are partly masked.
+CREATE TABLE IF NOT EXISTS auth_log (
+  id      INTEGER PRIMARY KEY,
+  at      TEXT NOT NULL,
+  event   TEXT NOT NULL,                        -- login | login_failed | logout | pin_changed
+  user_id INTEGER,
+  phone   TEXT,                                 -- masked, e.g. 91******0001
+  ip      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_auth_log_at ON auth_log(at);
 -- Payments received. Kept even if the institute is later deleted: invoices are tax records.
 CREATE TABLE IF NOT EXISTS payments (
   id             INTEGER PRIMARY KEY,
@@ -255,10 +266,24 @@ export class Platform {
   }
 
   /** Sets a new PIN and signs the user out on every device (the caller issues a fresh session). */
+  authLog(event, { userId = null, phone = null, ip = null } = {}) {
+    const masked = phone ? `${String(phone).slice(0, 2)}${'*'.repeat(Math.max(0, String(phone).length - 6))}${String(phone).slice(-4)}` : null;
+    this.db.prepare('INSERT INTO auth_log (at, event, user_id, phone, ip) VALUES (?, ?, ?, ?, ?)').run(this.nowIso(), event, userId, masked, ip);
+    // Keep 180 days.
+    this.db.prepare('DELETE FROM auth_log WHERE at < ?').run(new Date(this.clock() - 180 * 86_400_000).toISOString());
+  }
+
+  listAuthLog(limit = 200) {
+    return this.db
+      .prepare('SELECT a.at, a.event, a.phone, a.ip, u.name FROM auth_log a LEFT JOIN users u ON u.id = a.user_id ORDER BY a.id DESC LIMIT ?')
+      .all(Math.min(Number(limit) || 200, 1000));
+  }
+
   setPin(userId, pin) {
     const u = this.getUser(userId);
     this.db.prepare('UPDATE users SET pin_hash = ?, token_version = token_version + 1 WHERE id = ?').run(hashPin(requirePin(pin, u?.phone)), userId);
     this.signOutEverywhere(userId);
+    this.authLog('pin_changed', { userId, phone: u?.phone });
   }
 
   /**
@@ -285,11 +310,13 @@ export class Platform {
     const ok = await checkPin(pin, u ? u.pin_hash : DUMMY_HASH);
     if (!u || !ok) {
       this.db.prepare('INSERT INTO login_failures (phone, ip, at) VALUES (?, ?, ?)').run(phone, ip, now);
+      this.authLog('login_failed', { userId: u?.id ?? null, phone, ip });
       this.db.prepare('DELETE FROM login_failures WHERE at < ?').run(now - 4 * LOGIN_WINDOW_MS);
       throw new HttpError(401, 'Wrong mobile number or PIN');
     }
     this.db.prepare('DELETE FROM login_failures WHERE phone = ? AND ip = ?').run(phone, ip);
     this.db.prepare('UPDATE users SET last_login_at = ? WHERE id = ?').run(this.nowIso(), u.id);
+    this.authLog('login', { userId: u.id, phone, ip });
     return { user: u, weakPin: Boolean(pinProblem(pin, phone)) };
   }
 
@@ -330,7 +357,10 @@ export class Platform {
   /** Log out one device. */
   revokeToken(token) {
     const claims = this.readToken(token);
-    if (claims) this.db.prepare('UPDATE sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL').run(this.nowIso(), claims.sid);
+    if (claims) {
+      this.db.prepare('UPDATE sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL').run(this.nowIso(), claims.sid);
+      this.authLog('logout', { userId: claims.uid });
+    }
   }
 
   signOutEverywhere(userId) {
