@@ -83,6 +83,9 @@ export default function Messages() {
                     <div>{m.body}</div>
                     <div className="bubble-time">
                       {fmtTime(m.createdAt)}
+                      {m.direction === 'out' && m.status && m.status !== 'failed' && (
+                        <span className={`ticks ${m.status}`} title={m.status}>{m.status === 'sent' ? ' ✓' : ' ✓✓'}</span>
+                      )}
                       {m.error && <span className="error-text"> · failed: {m.error}</span>}
                     </div>
                   </div>

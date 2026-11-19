@@ -377,7 +377,7 @@ function WhatsAppSettings() {
   const webhook = `${window.location.origin}/webhooks/whatsapp/${slug}`;
   const submit = (e) => {
     e.preventDefault();
-    const body = { phoneNumberId: f.phoneNumberId, template: f.template, templateLang: f.templateLang, verifyToken: f.verifyToken };
+    const body = { phoneNumberId: f.phoneNumberId, template: f.template, digestTemplate: f.digestTemplate, templateLang: f.templateLang, verifyToken: f.verifyToken };
     if (f.token) body.token = f.token;
     if (f.appSecret) body.appSecret = f.appSecret;
     save(() => api.patch('/whatsapp', body), 'WhatsApp settings saved').then((r) => r && setF({ ...r, token: '', appSecret: '' }));
@@ -405,7 +405,10 @@ function WhatsAppSettings() {
             </label>
           </div>
           <div className="grid2">
-            <label className="field">Template name<input className="input" value={f.template} onChange={(e) => setF({ ...f, template: e.target.value })} placeholder="attendance_alert" /><span className="hint">Approved template with Leave / Late 15 min quick replies</span></label>
+            <label className="field">Absence alert template<input className="input" value={f.template} onChange={(e) => setF({ ...f, template: e.target.value })} placeholder="attendance_alert" /><span className="hint">Approved, with 3 quick replies: Leave, Late 15 min, Mujhe call karein</span></label>
+            <label className="field">Owner summary template<input className="input" value={f.digestTemplate ?? ''} onChange={(e) => setF({ ...f, digestTemplate: e.target.value })} placeholder="owner_summary" /><span className="hint">Approved, 8 values; without it the daily summary isn't sent</span></label>
+          </div>
+          <div className="grid2">
             <label className="field">Template language<input className="input" value={f.templateLang} onChange={(e) => setF({ ...f, templateLang: e.target.value })} placeholder="en" /></label>
           </div>
           <div className="divider" />

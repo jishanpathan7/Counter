@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { openDb } from './db.js';
-import { AttendanceService, HttpError, normalizePhone } from './service.js';
+import { AttendanceService, HttpError, mapLimit, normalizePhone } from './service.js';
 import { messengerFromConfig } from './messaging.js';
 import { addDays } from './time.js';
 
@@ -277,25 +277,27 @@ export class Platform {
       onChange: () => this.onChange(slug),
       logger: this.logger,
     });
-    svc.messenger = messengerFromConfig(svc.getWhatsAppConfig());
+    svc.messenger = messengerFromConfig(svc.getWhatsAppConfig(), { apiVersion: this.env.WHATSAPP_GRAPH_VERSION });
     this.services.set(slug, svc);
     return svc;
   }
 
   refreshMessenger(slug) {
     const svc = this.service(slug);
-    svc.messenger = messengerFromConfig(svc.getWhatsAppConfig());
+    svc.messenger = messengerFromConfig(svc.getWhatsAppConfig(), { apiVersion: this.env.WHATSAPP_GRAPH_VERSION });
     return svc.messenger.mode;
   }
 
+  /** One slow institute (or a slow WhatsApp call) must not hold up the others: run a few at once. */
   async tickAll() {
-    for (const i of this.db.prepare("SELECT slug FROM institutes WHERE status = 'active'").all()) {
+    const slugs = this.db.prepare("SELECT slug FROM institutes WHERE status = 'active'").all().map((i) => i.slug);
+    await mapLimit(slugs, 4, async (slug) => {
       try {
-        await this.service(i.slug).tick();
+        await this.service(slug).tick();
       } catch (err) {
-        this.logger.error?.(`Scheduler failed for ${i.slug}:`, err);
+        this.logger.error?.(`Scheduler failed for ${slug}:`, err);
       }
-    }
+    });
   }
 
   // ----------------------------------------------------------- memberships

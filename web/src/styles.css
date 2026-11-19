@@ -395,6 +395,8 @@ svg.icon { width: 18px; height: 18px; flex: none; stroke: currentColor; fill: no
 .bubble.in { background: var(--chat-in); border-top-right-radius: 2px; }
 .bubble-from { font-size: 12px; font-weight: 600; color: var(--green); margin-bottom: 2px; }
 .bubble-time { font-size: 11px; color: var(--muted); text-align: right; margin-top: 2px; }
+.ticks { letter-spacing: -2px; }
+.ticks.read { color: #34b7f1; }
 .bubble-buttons { display: flex; flex-direction: column; gap: 4px; }
 .bubble-buttons button { background: var(--chat-out); border: 0; border-radius: 10px; padding: 9px; color: #0b8fcf; font-weight: 600; font-size: 14px; box-shadow: 0 1px 1px rgba(0, 0, 0, 0.08); }
 .phone-input { display: flex; gap: 8px; padding: 8px; background: var(--surface-2); }

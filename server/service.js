@@ -21,13 +21,27 @@ const DEFAULT_SETTINGS = {
 };
 
 /** WhatsApp Cloud API settings, kept per institute. Secrets never leave the server. */
-const WA_KEYS = ['token', 'phoneNumberId', 'template', 'templateLang', 'verifyToken', 'appSecret'];
+const WA_KEYS = ['token', 'phoneNumberId', 'template', 'digestTemplate', 'templateLang', 'verifyToken', 'appSecret'];
 const WA_SECRET = new Set(['token', 'appSecret']);
 
 /** Fill {placeholders} in a message template. */
 export function renderTemplate(template, vars) {
   return String(template).replace(/\{(\w+)\}/g, (m, k) => (vars[k] !== undefined ? String(vars[k]) : m));
 }
+
+/** Run `fn` over `items` with at most `limit` running at once (WhatsApp sends in parallel, but politely). */
+export async function mapLimit(items, limit, fn) {
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const item = items[next++];
+      await fn(item);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+}
+
+const DELIVERY_RANK = { sent: 1, delivered: 2, read: 3, failed: 4 };
 
 /** A student is "at risk" if they keep missing class without a reason. */
 export const AT_RISK = { minPct: 75, recentAbsences: 3, recentDays: 14 };
@@ -425,7 +439,7 @@ export class AttendanceService {
       .all(session.id);
 
     const verified = { ...session, verified_at: at };
-    for (const student of absentees) await this.sendAlert(verified, student);
+    await mapLimit(absentees, 8, (student) => this.sendAlert(verified, student));
     this.changed();
   }
 
@@ -450,12 +464,15 @@ export class AttendanceService {
 
     const msg = this.logMessage({ phone: student.parent_phone, direction: 'out', body: text, buttons, alertId });
     try {
-      await this.messenger.send({
+      const { id } = await this.messenger.send({
         to: student.parent_phone,
         text,
         buttons,
+        template: 'alert',
         params: [parentName, batch.name, time, student.name],
       });
+      this.markSent(msg, id);
+      this.db.prepare("UPDATE alerts SET delivery = 'sent' WHERE id = ?").run(alertId);
     } catch (err) {
       this.logger.error?.(`WhatsApp alert ${alertId} failed: ${err.message}`);
       this.db.prepare("UPDATE alerts SET status = 'failed', error = ? WHERE id = ?").run(err.message, alertId);
@@ -471,8 +488,10 @@ export class AttendanceService {
    * Handle an incoming WhatsApp message. `payload` is the quick-reply button id
    * (e.g. 'LATE:12'); `text` is what the parent typed or the button label.
    */
-  async handleReply({ phone, payload = null, text = '' }) {
+  async handleReply({ phone, payload = null, text = '', id = null }) {
     const from = normalizePhone(phone);
+    // Meta retries webhooks it thinks failed: the same message id means we've already handled it.
+    if (id && this.db.prepare('SELECT 1 FROM messages WHERE wamid = ?').get(id)) return { matched: false, duplicate: true };
     let alert = null;
     let choice = null;
 
@@ -500,7 +519,12 @@ export class AttendanceService {
           .get(from, this.today()) ?? null;
     }
 
-    this.logMessage({ phone: from, direction: 'in', body: String(text || payload || '').slice(0, 1000), alertId: alert?.id ?? null });
+    try {
+      this.logMessage({ phone: from, direction: 'in', body: String(text || payload || '').slice(0, 1000), alertId: alert?.id ?? null, wamid: id });
+    } catch (err) {
+      if (/UNIQUE/i.test(err.message)) return { matched: false, duplicate: true }; // a retry arriving at the same moment
+      throw err;
+    }
 
     if (!alert || !choice) {
       this.changed();
@@ -535,11 +559,13 @@ export class AttendanceService {
     }
 
     const ack = option.ack ?? `Thank you. Noted: ${option.title}.`;
-    this.logMessage({ phone: from, direction: 'out', body: ack, alertId: alert.id });
+    const ackMsg = this.logMessage({ phone: from, direction: 'out', body: ack, alertId: alert.id });
     try {
-      await this.messenger.send({ to: from, text: ack });
+      const { id: ackId } = await this.messenger.send({ to: from, text: ack });
+      this.markSent(ackMsg, ackId);
     } catch (err) {
       this.logger.error?.(`WhatsApp acknowledgement failed: ${err.message}`);
+      this.db.prepare("UPDATE messages SET error = ?, status = 'failed' WHERE id = ?").run(err.message, ackMsg);
     }
 
     this.changed();
@@ -645,7 +671,7 @@ export class AttendanceService {
       .prepare(
         `SELECT st.id, st.name, st.parent_name, st.parent_phone,
                 a.status, a.note, a.source, a.updated_at,
-                al.id AS alert_id, al.status AS alert_status, al.sent_at, al.reply, al.replied_at, al.escalated_at, al.error,
+                al.id AS alert_id, al.status AS alert_status, al.delivery, al.sent_at, al.reply, al.replied_at, al.escalated_at, al.error,
                 t.id AS task_id, t.status AS task_status, t.outcome AS task_outcome
            FROM students st
            LEFT JOIN attendance a ON a.session_id = ? AND a.student_id = st.id
@@ -671,6 +697,7 @@ export class AttendanceService {
           ? {
               id: r.alert_id,
               status: r.alert_status,
+              delivery: r.delivery,
               sentAt: r.sent_at,
               replyDueAt: new Date(Date.parse(r.sent_at) + replyTimeoutMinutes * 60_000).toISOString(),
               reply: r.reply ? REPLY_OPTIONS[r.reply]?.title ?? r.reply : null,
@@ -771,11 +798,50 @@ export class AttendanceService {
 
   // -------------------------------------------------------------- messages
 
-  logMessage({ phone, direction, body, buttons = null, alertId = null }) {
+  logMessage({ phone, direction, body, buttons = null, alertId = null, wamid = null }) {
     const r = this.db
-      .prepare('INSERT INTO messages (phone, direction, body, buttons, alert_id, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(phone, direction, body, buttons ? JSON.stringify(buttons) : null, alertId, this.nowIso());
+      .prepare('INSERT INTO messages (phone, direction, body, buttons, alert_id, wamid, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(phone, direction, body, buttons ? JSON.stringify(buttons) : null, alertId, wamid, this.nowIso());
     return Number(r.lastInsertRowid);
+  }
+
+  /** Record WhatsApp's message id for an outgoing message, so delivery updates can find it. */
+  markSent(messageId, wamid) {
+    this.db.prepare("UPDATE messages SET wamid = ?, status = 'sent', status_at = ? WHERE id = ?").run(wamid ?? null, this.nowIso(), messageId);
+  }
+
+  /**
+   * A delivery update from WhatsApp for a message we sent. Updates arrive out of order, so a
+   * status never moves backwards (read beats delivered beats sent); "failed" always wins.
+   * An absence alert that can't be delivered goes straight to the call list.
+   */
+  handleStatus({ id, status, timestamp = null, error = null }) {
+    if (!id || !DELIVERY_RANK[status]) return { matched: false };
+    const msg = this.db.prepare("SELECT * FROM messages WHERE wamid = ? AND direction = 'out'").get(id);
+    if (!msg) return { matched: false };
+    if (status !== 'failed' && (DELIVERY_RANK[msg.status] ?? 0) >= DELIVERY_RANK[status]) return { matched: true };
+    const at = timestamp ? new Date(Number(timestamp) * 1000).toISOString() : this.nowIso();
+    const reason = error
+      ? error.code === 131026
+        ? 'This number is not on WhatsApp or cannot receive messages'
+        : `${error.title || 'Delivery failed'}${error.code ? ` (code ${error.code})` : ''}`
+      : null;
+    this.db
+      .prepare('UPDATE messages SET status = ?, status_at = ?, error = COALESCE(?, error) WHERE id = ?')
+      .run(status, at, reason, msg.id);
+
+    // The absence alert itself (acknowledgements carry no buttons).
+    if (msg.alert_id && msg.buttons) {
+      this.db.prepare('UPDATE alerts SET delivery = ? WHERE id = ?').run(status, msg.alert_id);
+      if (status === 'failed') {
+        const r = this.db
+          .prepare("UPDATE alerts SET status = 'failed', error = ? WHERE id = ? AND status = 'sent'")
+          .run(reason ?? 'Delivery failed', msg.alert_id);
+        if (r.changes) this.createTask(msg.alert_id, `WhatsApp couldn't deliver: ${reason ?? 'unknown reason'}`);
+      }
+    }
+    this.changed();
+    return { matched: true };
   }
 
   listThreads() {
@@ -797,7 +863,7 @@ export class AttendanceService {
     const p = normalizePhone(phone);
     return this.db
       .prepare(
-        `SELECT m.id, m.direction, m.body, m.buttons, m.alert_id AS alertId, m.error, m.created_at AS createdAt,
+        `SELECT m.id, m.direction, m.body, m.buttons, m.alert_id AS alertId, m.error, m.status, m.created_at AS createdAt,
                 al.status AS alertStatus
            FROM messages m LEFT JOIN alerts al ON al.id = m.alert_id
           WHERE m.phone = ? ORDER BY m.id`,
@@ -1183,6 +1249,17 @@ export class AttendanceService {
     return lines.join('\n');
   }
 
+  /**
+   * Values for the approved owner-summary template, in order:
+   * {{1}} institute · {{2}} date · {{3}} present · {{4}} absent · {{5}} leave or late ·
+   * {{6}} alerts sent · {{7}} parents replied · {{8}} calls pending
+   */
+  digestParams(date = this.today()) {
+    const st = this.getStats(date);
+    const label = new Intl.DateTimeFormat('en-IN', { day: 'numeric', month: 'short', timeZone: 'UTC' }).format(new Date(`${date}T00:00:00Z`));
+    return [this.rawSettings().instituteName, label, st.present, st.absent, st.leaveLate, st.alertsSent, st.replied, st.openTasks];
+  }
+
   async maybeSendDigest({ force = false } = {}) {
     const s = this.rawSettings();
     const today = this.today();
@@ -1195,9 +1272,12 @@ export class AttendanceService {
     const text = this.buildDigest(today);
     const msg = this.logMessage({ phone: s.ownerPhone, direction: 'out', body: text });
     try {
-      await this.messenger.send({ to: s.ownerPhone, text });
+      // On real WhatsApp this goes out as the approved owner-summary template (single-line values).
+      const { id } = await this.messenger.send({ to: s.ownerPhone, text, template: 'digest', params: this.digestParams(today) });
+      this.markSent(msg, id);
     } catch (err) {
-      this.db.prepare('UPDATE messages SET error = ? WHERE id = ?').run(err.message, msg);
+      this.logger.error?.(`Owner summary failed: ${err.message}`);
+      this.db.prepare("UPDATE messages SET error = ?, status = 'failed' WHERE id = ?").run(err.message, msg);
     }
     this.changed();
     return true;

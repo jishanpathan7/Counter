@@ -61,6 +61,12 @@ owner, front desk, teacher), a first-run setup wizard, dark mode, and installabi
 - Owners can only change the name or PIN of people who belong to their institute alone; the agency
   admin can't be added to an institute's team.
 - WhatsApp webhooks are rejected unless they are signed with the institute's app secret.
+- Every message stores WhatsApp's message id. Delivery updates show as ✓ / ✓✓ / read, an alert that
+  can't be delivered (e.g. the number isn't on WhatsApp) becomes a call task at once, and a webhook
+  Meta delivers twice is handled once.
+- Sends time out after 10 seconds and are retried on rate limits and temporary errors; alerts for a
+  class go out in parallel, and institutes are processed side by side, so one slow call doesn't
+  delay everyone.
 - Failed WhatsApp sends go straight to the call list. Holidays send nothing.
 - Each institute has its own database file, so their data never mixes. WhatsApp tokens never
   reach the browser.
@@ -97,7 +103,7 @@ Production:
 ```bash
 npm run build
 SESSION_SECRET=$(openssl rand -hex 32) npm start   # serves API + app on PORT
-npm test                                           # 27 server and API tests
+npm test                                           # 31 server and API tests
 ```
 
 Outside `npm run dev`, the server refuses to start without a `SESSION_SECRET` of at least 32
@@ -130,6 +136,11 @@ Each institute connects its own WhatsApp Business number in **Settings → Whats
 
    Once it's approved, enter its name and language. Without an approved template, WhatsApp only
    delivers alerts to parents who messaged you in the last 24 hours.
+
+   Also create the **owner summary** template (category *Utility*, no buttons) with eight values:
+   `{{1}}: summary for {{2}}. Present {{3}}, absent {{4}}, on leave or late {{5}}. WhatsApp alerts {{6}}, replied {{7}}. Calls pending {{8}}.`
+   (institute, date, present, absent, leave or late, alerts sent, parents replied, calls pending).
+   Without it the daily summary is not sent on real WhatsApp; the WhatsApp log shows why.
 3. Webhook: paste the **callback URL** shown in the form (`/webhooks/whatsapp/<institute>`) into
    Meta along with your verify token, subscribe to **messages**, and enter the app secret (Meta App
    settings → Basic). It is required: unsigned webhooks are rejected, so replies only arrive once

@@ -89,7 +89,8 @@ export function AlertState({ alert, task, now, tz }) {
     const left = Date.parse(alert.replyDueAt) - now;
     return (
       <span className="alert-state wait">
-        WhatsApp sent {fmtTime(alert.sentAt, tz)} · {left > 0 ? `waiting for reply ${fmtCountdown(left)}` : 'escalating…'}
+        {alert.delivery === 'read' ? 'Read by parent ✓✓' : alert.delivery === 'delivered' ? 'Delivered ✓✓' : 'WhatsApp sent ✓'} {fmtTime(alert.sentAt, tz)} ·{' '}
+        {left > 0 ? `waiting for reply ${fmtCountdown(left)}` : 'escalating…'}
       </span>
     );
   }

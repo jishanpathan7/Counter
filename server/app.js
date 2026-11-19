@@ -59,7 +59,7 @@ export function createApp({ platform, hub, demo = false, setupToken = null, real
 
   // Serverless hosts have no background timer: run the scheduler as requests come in.
   if (tickOnRequest) {
-    app.use(['/api', '/webhooks'], async (_req, _res, next) => {
+    app.use('/api', async (_req, _res, next) => {
       try {
         await tickOnRequest();
       } catch (err) {
@@ -82,14 +82,24 @@ export function createApp({ platform, hub, demo = false, setupToken = null, real
     // Signatures are mandatory: otherwise anyone who knows the URL could forge a parent's reply.
     if (!cfg.appSecret) return res.sendStatus(403);
     if (!verifySignature(req.rawBody, req.get('x-hub-signature-256'), cfg.appSecret)) return res.sendStatus(401);
-    res.sendStatus(200); // acknowledge fast; Meta retries slow webhooks
-    for (const reply of parseWebhook(req.body)) {
+    // Process first, then acknowledge: on serverless hosts work after the response may never run.
+    // Duplicate deliveries (Meta retries) are recognised by message id and ignored.
+    const { replies, statuses } = parseWebhook(req.body);
+    for (const st of statuses) {
+      try {
+        svc.handleStatus(st);
+      } catch (err) {
+        logger.error?.(`Webhook status failed: ${err.message}`);
+      }
+    }
+    for (const reply of replies) {
       try {
         await svc.handleReply(reply);
       } catch (err) {
         logger.error?.(`Webhook reply failed: ${err.message}`);
       }
     }
+    res.sendStatus(200);
   };
   app.get('/webhooks/whatsapp/:slug', verifyWebhook);
   app.post('/webhooks/whatsapp/:slug', receiveWebhook);

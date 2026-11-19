@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { openDb } from '../server/db.js';
 import { AttendanceService, normalizePhone, parseReplyText } from '../server/service.js';
-import { buildPayload, parseWebhook, verifySignature } from '../server/messaging.js';
+import { buildPayload, createWhatsAppMessenger, parseWebhook, verifySignature, WhatsAppError } from '../server/messaging.js';
 import { zonedTimeToIso, localDate } from '../server/time.js';
 
 const TZ = 'Asia/Kolkata';
@@ -17,7 +17,7 @@ function setup({ failSend = false } = {}) {
     async send(msg) {
       if (failSend && msg.buttons) throw new Error('boom');
       sent.push(msg);
-      return { id: 'x' };
+      return { id: `wamid.${sent.length}` };
     },
   };
   const db = openDb(':memory:');
@@ -227,14 +227,25 @@ test('WhatsApp payloads and webhook parsing', () => {
   assert.equal(inter.interactive.action.buttons[0].reply.id, 'LEAVE:1');
   assert.equal(buildPayload({ to: '91900', text: 'hi' }).type, 'text');
 
-  const replies = parseWebhook({
-    entry: [{ changes: [{ value: { messages: [
-      { from: '919000000003', type: 'button', button: { payload: 'LATE:7', text: 'Late 15 min' } },
-      { from: '919000000004', type: 'interactive', interactive: { button_reply: { id: 'LEAVE:8', title: 'Leave' } } },
-      { from: '919000000005', type: 'text', text: { body: 'chutti' } },
-    ] } }] }],
+  const { replies, statuses } = parseWebhook({
+    entry: [{ changes: [{ value: {
+      messages: [
+        { id: 'in.1', from: '919000000003', type: 'button', button: { payload: 'LATE:7', text: 'Late 15 min' } },
+        { id: 'in.2', from: '919000000004', type: 'interactive', interactive: { button_reply: { id: 'LEAVE:8', title: 'Leave' } } },
+        { id: 'in.3', from: '919000000005', type: 'text', text: { body: 'chutti' } },
+        { id: 'in.4', from: '919000000006', type: 'audio', audio: {} },
+      ],
+      statuses: [{ id: 'out.1', status: 'failed', timestamp: '1795000000', errors: [{ code: 131026, title: 'Message undeliverable' }] }],
+    } }] }],
   });
-  assert.deepEqual(replies.map((r) => r.payload ?? r.text), ['LATE:7', 'LEAVE:8', 'chutti']);
+  assert.deepEqual(replies.map((r) => r.payload ?? r.text), ['LATE:7', 'LEAVE:8', 'chutti', '[audio]']);
+  assert.equal(replies[0].id, 'in.1');
+  assert.deepEqual(statuses, [{ id: 'out.1', status: 'failed', timestamp: '1795000000', error: { code: 131026, title: 'Message undeliverable' } }]);
+
+  // Owner summary template: no buttons, values flattened to one line.
+  const digest = buildPayload({ to: '91900', text: 'x', params: ['Bright\nFuture', 'a\tb'], templateName: 'owner_summary' });
+  assert.equal(digest.template.components.length, 1);
+  assert.deepEqual(digest.template.components[0].parameters.map((p) => p.text), ['Bright Future', 'a b']);
 
   const body = Buffer.from('{"a":1}');
   const sig = `sha256=${crypto.createHmac('sha256', 's3cret').update(body).digest('hex')}`;
@@ -399,4 +410,89 @@ test('older databases upgrade: late records become T, sent classes keep their hi
   assert.equal(db.prepare('SELECT submitted_at FROM sessions WHERE id = 1').get().submitted_at, '2026-11-17T10:40:00.000Z');
   assert.doesNotThrow(() => db.prepare("INSERT INTO attendance VALUES (1, 2, 'T', NULL, 'teacher', 'y') ON CONFLICT DO UPDATE SET status = 'T'").run());
   db.close();
+});
+
+test('WhatsApp client: current API version, retries on temporary errors, timeouts, no blind retries', async () => {
+  const calls = [];
+  const reply = (status, body) => ({ ok: status < 300, status, json: async () => body });
+  const fake = (responses) => async (url, opts) => {
+    calls.push(url);
+    const r = responses.shift();
+    if (r === 'hang') return new Promise((_, reject) => opts.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'TimeoutError' }))));
+    return r;
+  };
+  const make = (responses, extra = {}) =>
+    createWhatsAppMessenger({ token: 't', phoneNumberId: '123', fetchImpl: fake(responses), sleep: async () => {}, ...extra });
+
+  // Default version is v26.0 (v21.0 is removed on 21 Jan 2027); it can be overridden.
+  await make([reply(200, { messages: [{ id: 'w1' }] })]).send({ to: '91', text: 'hi' });
+  assert.match(calls.at(-1), /graph\.facebook\.com\/v26\.0\/123\/messages/);
+  await make([reply(200, { messages: [{ id: 'w1' }] })], { apiVersion: 'v27.0' }).send({ to: '91', text: 'hi' });
+  assert.match(calls.at(-1), /\/v27\.0\//);
+
+  // 500, then rate limit, then success: three attempts, the id comes back.
+  calls.length = 0;
+  const ok = await make([reply(500, {}), reply(400, { error: { code: 130429, message: 'rate limit' } }), reply(200, { messages: [{ id: 'w9' }] })]).send({ to: '91', text: 'hi' });
+  assert.equal(ok.id, 'w9');
+  assert.equal(calls.length, 3);
+
+  // A permanent error (bad token) is not retried.
+  calls.length = 0;
+  await assert.rejects(make([reply(401, { error: { code: 190, message: 'Invalid token' } })]).send({ to: '91', text: 'hi' }), (e) => e instanceof WhatsAppError && !e.retryable && /Invalid token/.test(e.message));
+  assert.equal(calls.length, 1);
+
+  // A hung request times out (and is retried, then gives up).
+  await assert.rejects(make(['hang', 'hang', 'hang'], { timeoutMs: 20 }).send({ to: '91', text: 'hi' }), /didn't answer/);
+
+  // The owner summary is never sent as free text on real WhatsApp.
+  await assert.rejects(make([]).send({ to: '91', text: 'x', template: 'digest', params: [] }), /owner-summary template/);
+});
+
+test('delivery updates: ticks never go backwards, and an undeliverable alert becomes a call at once', async () => {
+  const t = setup();
+  await t.service.markAll(t.session.id, 'P');
+  await t.service.mark(t.session.id, t.ids.Rohan, 'A');
+  await t.service.mark(t.session.id, t.ids.Meera, 'A');
+  await t.service.verify(t.session.id);
+  const wamidOf = (name) => t.service.db.prepare("SELECT m.wamid FROM messages m JOIN alerts a ON a.id = m.alert_id JOIN students s ON s.id = a.student_id WHERE s.name = ? AND m.buttons IS NOT NULL").get(name).wamid;
+  const rohan = wamidOf('Rohan');
+  assert.ok(rohan, 'message id stored');
+  assert.equal(t.student('Rohan').alert.delivery, 'sent');
+
+  t.service.handleStatus({ id: rohan, status: 'read' });
+  t.service.handleStatus({ id: rohan, status: 'delivered' }); // arrives late: ignored
+  assert.equal(t.student('Rohan').alert.delivery, 'read');
+
+  t.service.handleStatus({ id: wamidOf('Meera'), status: 'failed', error: { code: 131026, title: 'Message undeliverable' } });
+  assert.equal(t.student('Meera').alert.status, 'failed');
+  const [task] = t.service.listTasks('open');
+  assert.equal(task.studentName, 'Meera');
+  assert.match(task.reason, /not on WhatsApp/);
+  assert.equal(t.service.handleStatus({ id: 'unknown', status: 'read' }).matched, false);
+});
+
+test('a webhook delivered twice is handled once', async () => {
+  const t = setup();
+  await t.service.markAll(t.session.id, 'P');
+  await t.service.mark(t.session.id, t.ids.Rohan, 'A');
+  await t.service.verify(t.session.id);
+  const before = t.sent.length;
+  const first = await t.service.handleReply({ id: 'in.42', phone: '9000000003', text: 'chutti' });
+  const again = await t.service.handleReply({ id: 'in.42', phone: '9000000003', text: 'chutti' });
+  assert.equal(first.matched, true);
+  assert.equal(again.duplicate, true);
+  assert.equal(t.sent.length, before + 1, 'one acknowledgement, not two');
+  assert.equal(t.service.listMessages('9000000003').filter((m) => m.direction === 'in').length, 1);
+});
+
+test('owner summary goes out with template values', async () => {
+  const t = setup();
+  await t.service.markAll(t.session.id, 'P');
+  await t.service.mark(t.session.id, t.ids.Rohan, 'A');
+  await t.service.verify(t.session.id);
+  t.service.updateSettings({ ownerPhone: '9000000099' });
+  await t.service.maybeSendDigest({ force: true });
+  const msg = t.sent.find((m) => m.to === '919000000099');
+  assert.equal(msg.template, 'digest');
+  assert.deepEqual(msg.params, ['My Coaching Institute', '18 Nov', 3, 1, 0, 1, 0, 0]);
 });

@@ -116,6 +116,16 @@ function migrate(db) {
   if (!hasColumn('tasks', 'urgent')) {
     db.exec('ALTER TABLE tasks ADD COLUMN urgent INTEGER NOT NULL DEFAULT 0');
   }
+  if (!hasColumn('messages', 'wamid')) {
+    db.exec('ALTER TABLE messages ADD COLUMN wamid TEXT'); // WhatsApp's own message id
+    db.exec('ALTER TABLE messages ADD COLUMN status TEXT'); // sent | delivered | read | failed
+    db.exec('ALTER TABLE messages ADD COLUMN status_at TEXT');
+  }
+  // Meta retries webhooks: one row per WhatsApp message id, so a retry is recognised and ignored.
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_wamid ON messages(wamid) WHERE wamid IS NOT NULL');
+  if (!hasColumn('alerts', 'delivery')) {
+    db.exec('ALTER TABLE alerts ADD COLUMN delivery TEXT'); // sent | delivered | read | failed
+  }
   if (!hasColumn('sessions', 'submitted_at')) {
     db.exec('ALTER TABLE sessions ADD COLUMN submitted_at TEXT');
     db.exec('UPDATE sessions SET submitted_at = verified_at WHERE verified_at IS NOT NULL');
