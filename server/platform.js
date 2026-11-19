@@ -5,6 +5,24 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { openDb } from './db.js';
+import { hasColumn, runMigrations } from './migrate.js';
+
+/** Platform database changes, in order. Add new ones at the end; never edit old ones. */
+const PLATFORM_MIGRATIONS = [
+  {
+    version: 1,
+    name: 'plans and billing',
+    up: (db) => {
+      if (hasColumn(db, 'institutes', 'plan')) return;
+      // Institutes from before plans existed keep working exactly as before: no limits, no due date.
+      db.exec(`ALTER TABLE institutes ADD COLUMN plan TEXT NOT NULL DEFAULT 'custom';
+        ALTER TABLE institutes ADD COLUMN billing_cycle TEXT NOT NULL DEFAULT 'monthly';
+        ALTER TABLE institutes ADD COLUMN paid_until TEXT;
+        ALTER TABLE institutes ADD COLUMN payment_link TEXT;
+        ALTER TABLE institutes ADD COLUMN billing TEXT;`);
+    },
+  },
+];
 import { AttendanceService, HttpError, mapLimit, normalizePhone } from './service.js';
 import { messengerFromConfig } from './messaging.js';
 import { addDays, localDate } from './time.js';
@@ -187,7 +205,9 @@ export class Platform {
     this.logger = logger;
     this.services = new Map();
     if (dataDir) fs.mkdirSync(path.join(dataDir, 'institutes'), { recursive: true });
-    this.db = new DatabaseSync(dataDir ? path.join(dataDir, 'platform.db') : ':memory:');
+    const platformFile = dataDir ? path.join(dataDir, 'platform.db') : null;
+    this.hadPlatformDb = Boolean(platformFile && fs.existsSync(platformFile) && fs.statSync(platformFile).size > 0);
+    this.db = new DatabaseSync(platformFile ?? ':memory:');
     // WAL + a busy timeout: the backup process (Litestream) briefly holds read locks.
     if (dataDir) this.db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
     this.db.exec('PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;');
@@ -196,15 +216,7 @@ export class Platform {
   }
 
   migrate() {
-    const has = (t, c) => this.db.prepare(`PRAGMA table_info(${t})`).all().some((x) => x.name === c);
-    if (!has('institutes', 'plan')) {
-      // Institutes from before plans existed keep working exactly as before: no limits, no due date.
-      this.db.exec(`ALTER TABLE institutes ADD COLUMN plan TEXT NOT NULL DEFAULT 'custom';
-        ALTER TABLE institutes ADD COLUMN billing_cycle TEXT NOT NULL DEFAULT 'monthly';
-        ALTER TABLE institutes ADD COLUMN paid_until TEXT;
-        ALTER TABLE institutes ADD COLUMN payment_link TEXT;
-        ALTER TABLE institutes ADD COLUMN billing TEXT;`);
-    }
+    runMigrations(this.db, PLATFORM_MIGRATIONS, { file: this.dataDir ? path.join(this.dataDir, 'platform.db') : null, existing: this.hadPlatformDb, logger: this.logger, label: 'platform.db' });
   }
 
   today() {
@@ -640,7 +652,7 @@ export class Platform {
     if (this.services.has(slug)) return this.services.get(slug);
     this.institute(slug);
     const file = this.dataDir ? path.join(this.dataDir, 'institutes', `${slug}.db`) : ':memory:';
-    const db = openDb(file);
+    const db = openDb(file, { logger: this.logger });
     const svc = new AttendanceService({
       db,
       messenger: null,

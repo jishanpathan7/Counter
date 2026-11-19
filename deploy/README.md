@@ -55,6 +55,37 @@ The app stops cleanly: it finishes the current scheduler round, closes the datab
 copies the last changes before it exits. Expect a few seconds of downtime. Check
 `https://<DOMAIN>/api/health`: its `release` should show the new version.
 
+## Staging: try updates before customers see them
+
+Run a second, small VM with the same setup and its own settings file:
+
+```sh
+cd attendance-alert/deploy
+cp .env.example staging.env   # DOMAIN=staging.yourbrand.in, a different SESSION_SECRET,
+                              # BACKUP_S3_PATH=staging, SEED_DEMO=true for demo data
+ENV_FILE=staging.env docker compose --env-file staging.env up -d --build
+```
+
+Deploy a change to staging first, click through it, then update production. Never point staging at
+production's `BACKUP_S3_PATH`: the two would overwrite each other's backups.
+
+## Database upgrades
+
+Schema changes are numbered migrations (`server/db.js` for each institute, `server/platform.js` for
+the platform). On start, each database is upgraded in order. Before the first change to an existing
+file, a copy is saved next to it as `<file>.before-v<N>`. If an upgrade ever goes wrong, stop the
+app, put that copy back and start the previous version. The error message names the migration that
+failed. Delete old `.before-v*` copies once you're happy.
+
+## CI
+
+`.github/workflows/ci.yml` runs on every push:
+- the full test suite, including the disaster-recovery test with Litestream;
+- the web build;
+- a production Docker build, which it starts and health-checks.
+
+Merge only when it's green.
+
 ## Monitoring
 
 | Watch | How | Alerts you when |
@@ -63,6 +94,7 @@ copies the last changes before it exits. Expect a few seconds of downtime. Check
 | Backups | Set `BACKUP_HEARTBEAT_URL` to a healthchecks.io-style URL that expects a ping every 5 minutes | Backups stop working |
 | Errors | Set `SENTRY_DSN` | Something fails: a 500 error, a scheduler failure or a webhook failure. Phone numbers are masked, and request bodies, cookies and headers are never sent. |
 | Logs | `docker compose logs -f app` | Logs are rotated at 20 MB × 10 files |
+| Request log (180 days) | Agency console API `/api/agency/request-log`, or `sqlite3 /data/logs.db` | Every API and webhook request: time, path (no query strings), status, user, address. Kept 180 days for CERT-In, and backed up with the rest |
 
 Docker also checks `/api/health` itself, and Caddy only starts sending traffic once the app is healthy.
 

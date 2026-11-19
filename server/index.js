@@ -3,7 +3,7 @@ import { DEMO_LOGINS, DEMO_PIN } from './seed.js';
 
 const port = Number(process.env.PORT ?? 3001);
 // `npm run dev` passes --dev: demo data on by default, no session secret needed.
-const { app, platform, tz, dataDir, isDemo, reporter, tickMs } = createRuntime({ dev: process.argv.includes('--dev') });
+const { app, platform, tz, dataDir, isDemo, reporter, tickMs, requestLog } = createRuntime({ dev: process.argv.includes('--dev') });
 
 process.on('unhandledRejection', (err) => {
   console.error('Unhandled promise rejection:', err);
@@ -45,6 +45,7 @@ const shutdown = async (signal) => {
   setTimeout(() => server.closeAllConnections?.(), 2000).unref(); // live-update streams stay open otherwise
   await ticking?.catch(() => {});
   platform.close();
+  requestLog.close();
   await reporter.flush();
   process.exit(0);
 };

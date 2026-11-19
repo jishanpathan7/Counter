@@ -116,3 +116,22 @@ test('the server stops cleanly on SIGTERM (as Docker does on deploy)', async () 
   }
   fs.rmSync(dataDir, { recursive: true, force: true });
 });
+
+test('request log: API calls kept 180 days, no query strings, health checks skipped', async (tt) => {
+  const { createRequestLog } = await import('../server/requestlog.js');
+  let now = Date.parse('2026-11-19T10:00:00Z');
+  const log = createRequestLog({ clock: () => now, logger: quiet });
+  const { base } = await serve(tt, () => ({ requestLog: log }));
+  await fetch(`${base}/api/health`);
+  await fetch(`${base}/api/auth/me?phone=9876543210`);
+  await fetch(`${base}/api/i/nowhere/board`);
+  await new Promise((r) => setTimeout(r, 50));
+  const rows = log.list();
+  assert.deepEqual(rows.map((r) => [r.method, r.path, r.status]).reverse(), [['GET', '/api/auth/me', 200], ['GET', '/api/i/nowhere/board', 401]]);
+  assert.ok(!JSON.stringify(rows).includes('9876543210'), 'query strings are never stored');
+  // A day later the 180-day purge runs; entries older than that are gone.
+  log.db.prepare("INSERT INTO requests (at, method, path, status, ms) VALUES ('2026-01-01T00:00:00Z', 'GET', '/api/old', 200, 1)").run();
+  now += 2 * 86_400_000;
+  assert.equal(log.purge(), 1);
+  assert.equal(log.list().length, 2);
+});

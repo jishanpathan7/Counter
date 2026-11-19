@@ -127,6 +127,15 @@ export function restoreMissing(settings, log = console.log) {
       if (restoreOne(settings, rel, file, tmp)) restored += 1;
       else log(`No backup of institute "${slug}" yet.`);
     }
+    // The 180-day request log (nice to have back, not needed to run).
+    const logsDb = path.join(settings.dataDir, 'logs.db');
+    if (!fs.existsSync(logsDb)) {
+      try {
+        if (restoreOne(settings, 'logs.db', logsDb, tmp)) restored += 1;
+      } catch {
+        log('No backup of the request log yet.');
+      }
+    }
     if (restored) log(`Restored ${restored} database${restored === 1 ? '' : 's'} from the backup.`);
     return { restored };
   } finally {

@@ -1,4 +1,6 @@
+import fs from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
+import { hasColumn, runMigrations } from './migrate.js';
 
 // P present · A absent · L leave · T late (arrived late, or parent says they're on the way)
 const attendanceTable = (name) => `CREATE TABLE IF NOT EXISTS ${name} (
@@ -142,59 +144,65 @@ CREATE INDEX IF NOT EXISTS idx_alerts_phone ON alerts(phone);
 CREATE INDEX IF NOT EXISTS idx_messages_phone ON messages(phone);
 `;
 
-export function openDb(file = ':memory:') {
-  const db = new DatabaseSync(file);
-  if (file !== ':memory:') db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
-  // secure_delete: erased rows are overwritten in the file, not left behind in free pages.
-  db.exec('PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;');
-  db.exec(SCHEMA);
-  migrate(db);
-  return db;
-}
-
-/** Small additive migrations for databases created by older versions. */
-function migrate(db) {
-  const hasColumn = (table, col) => db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col);
-  if (!hasColumn('students', 'removed_at')) db.exec('ALTER TABLE students ADD COLUMN removed_at TEXT');
-  // A second parent or guardian who also gets the alerts (optional).
-  if (!hasColumn('students', 'guardian2_phone')) db.exec('ALTER TABLE students ADD COLUMN guardian2_name TEXT; ALTER TABLE students ADD COLUMN guardian2_phone TEXT');
-  // The second guardian's number an alert was also sent to, so their reply matches it.
-  if (!hasColumn('alerts', 'phone2')) db.exec('ALTER TABLE alerts ADD COLUMN phone2 TEXT');
-  if (!hasColumn('batches', 'duration_minutes')) {
-    db.exec('ALTER TABLE batches ADD COLUMN duration_minutes INTEGER NOT NULL DEFAULT 120');
-  }
-  if (!hasColumn('tasks', 'urgent')) {
-    db.exec('ALTER TABLE tasks ADD COLUMN urgent INTEGER NOT NULL DEFAULT 0');
-  }
-  if (!hasColumn('messages', 'wamid')) {
-    db.exec('ALTER TABLE messages ADD COLUMN wamid TEXT'); // WhatsApp's own message id
-    db.exec('ALTER TABLE messages ADD COLUMN status TEXT'); // sent | delivered | read | failed
-    db.exec('ALTER TABLE messages ADD COLUMN status_at TEXT');
-  }
-  // Meta retries webhooks: one row per WhatsApp message id, so a retry is recognised and ignored.
-  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_wamid ON messages(wamid) WHERE wamid IS NOT NULL');
-  if (!hasColumn('alerts', 'delivery')) {
-    db.exec('ALTER TABLE alerts ADD COLUMN delivery TEXT'); // sent | delivered | read | failed
-  }
-  if (!hasColumn('sessions', 'submitted_at')) {
-    db.exec('ALTER TABLE sessions ADD COLUMN submitted_at TEXT');
-    db.exec('UPDATE sessions SET submitted_at = verified_at WHERE verified_at IS NOT NULL');
-  }
-  // Older databases only allowed P/A/L: rebuild the table to add T (late) and move late records over.
-  const att = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'attendance'").get()?.sql ?? '';
-  if (!att.includes("'T'")) {
-    db.exec('BEGIN');
-    try {
+/** Institute database changes, in order. Add new ones at the end with the next number; never edit old ones. */
+export const MIGRATIONS = [
+  { version: 1, name: 'class length', up: (db) => hasColumn(db, 'batches', 'duration_minutes') || db.exec('ALTER TABLE batches ADD COLUMN duration_minutes INTEGER NOT NULL DEFAULT 120') },
+  { version: 2, name: 'urgent calls', up: (db) => hasColumn(db, 'tasks', 'urgent') || db.exec('ALTER TABLE tasks ADD COLUMN urgent INTEGER NOT NULL DEFAULT 0') },
+  {
+    version: 3,
+    name: 'WhatsApp message ids and delivery',
+    up: (db) => {
+      if (!hasColumn(db, 'messages', 'wamid')) {
+        db.exec('ALTER TABLE messages ADD COLUMN wamid TEXT; ALTER TABLE messages ADD COLUMN status TEXT; ALTER TABLE messages ADD COLUMN status_at TEXT');
+      }
+      // Meta retries webhooks: one row per WhatsApp message id, so a retry is recognised and ignored.
+      db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_wamid ON messages(wamid) WHERE wamid IS NOT NULL');
+      if (!hasColumn(db, 'alerts', 'delivery')) db.exec('ALTER TABLE alerts ADD COLUMN delivery TEXT');
+    },
+  },
+  {
+    version: 4,
+    name: 'teacher sends the list',
+    up: (db) => {
+      if (hasColumn(db, 'sessions', 'submitted_at')) return;
+      db.exec('ALTER TABLE sessions ADD COLUMN submitted_at TEXT');
+      db.exec('UPDATE sessions SET submitted_at = verified_at WHERE verified_at IS NOT NULL');
+    },
+  },
+  {
+    version: 5,
+    name: 'late as its own status',
+    up: (db) => {
+      // Older databases only allowed P/A/L: rebuild the table to add T (late) and move late records over.
+      const att = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'attendance'").get()?.sql ?? '';
+      if (att.includes("'T'")) return;
       db.exec(attendanceTable('attendance_v2'));
       db.exec(`INSERT INTO attendance_v2 SELECT session_id, student_id,
                  CASE WHEN status = 'L' AND note LIKE 'Late%' THEN 'T' ELSE status END, note, source, updated_at
                FROM attendance`);
       db.exec('DROP TABLE attendance');
       db.exec('ALTER TABLE attendance_v2 RENAME TO attendance');
-      db.exec('COMMIT');
-    } catch (err) {
-      db.exec('ROLLBACK');
-      throw err;
-    }
-  }
+    },
+  },
+  { version: 6, name: 'removal date', up: (db) => hasColumn(db, 'students', 'removed_at') || db.exec('ALTER TABLE students ADD COLUMN removed_at TEXT') },
+  {
+    version: 7,
+    name: 'second guardian',
+    up: (db) => {
+      if (!hasColumn(db, 'students', 'guardian2_phone')) db.exec('ALTER TABLE students ADD COLUMN guardian2_name TEXT; ALTER TABLE students ADD COLUMN guardian2_phone TEXT');
+      if (!hasColumn(db, 'alerts', 'phone2')) db.exec('ALTER TABLE alerts ADD COLUMN phone2 TEXT');
+    },
+  },
+];
+export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
+
+export function openDb(file = ':memory:', { logger = console } = {}) {
+  const existing = file !== ':memory:' && fs.existsSync(file) && fs.statSync(file).size > 0;
+  const db = new DatabaseSync(file);
+  if (file !== ':memory:') db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
+  // secure_delete: erased rows are overwritten in the file, not left behind in free pages.
+  db.exec('PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;');
+  db.exec(SCHEMA);
+  runMigrations(db, MIGRATIONS, { file, existing, logger, label: file === ':memory:' ? 'database' : file.split('/').pop() });
+  return db;
 }

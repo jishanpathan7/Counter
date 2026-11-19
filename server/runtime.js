@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { Platform } from './platform.js';
 import { createApp, createEventHub } from './app.js';
 import { createErrorReporter } from './errors.js';
+import { createRequestLog } from './requestlog.js';
 import { seedDemo } from './seed.js';
 import { isValidTimeZone } from './time.js';
 
@@ -54,6 +55,9 @@ export function createRuntime({ env = process.env, serverless = false, dev = fal
   if (env.DATA_ENCRYPTION_KEY && env.DATA_ENCRYPTION_KEY.length < 32) {
     throw new Error('DATA_ENCRYPTION_KEY must be at least 32 characters, e.g. the output of `openssl rand -hex 32`.');
   }
+
+  fs.mkdirSync(dataDir, { recursive: true });
+  const requestLog = createRequestLog({ dataDir, logger });
 
   const hub = createEventHub();
   const platform = new Platform({ dataDir, tz, env, logger, reporter, onChange: (slug) => hub.broadcast(slug) });
@@ -111,11 +115,12 @@ export function createRuntime({ env = process.env, serverless = false, dev = fal
     trustProxy: serverless ? true : parseTrustProxy(env.TRUST_PROXY),
     reporter,
     release,
+    requestLog,
     // A scheduler that hasn't run for a few rounds is a problem (no alerts go out). Serverless has none.
     schedulerMaxAgeMs: serverless ? 0 : Math.max(60_000, tickMs * 6),
     staticDir: serverless ? null : path.join(ROOT, 'dist'),
     logger,
   });
 
-  return { app, platform, tz, dataDir, isDemo, reporter, tickMs };
+  return { app, platform, tz, dataDir, isDemo, reporter, tickMs, requestLog };
 }

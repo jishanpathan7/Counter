@@ -48,11 +48,12 @@ function csvCell(v) {
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-export function createApp({ platform, hub, demo = false, setupToken = null, realtime = true, ephemeral = false, tickOnRequest = null, trustProxy = 'loopback', staticDir = null, reporter = null, release = null, schedulerMaxAgeMs = 0, logger = console }) {
+export function createApp({ platform, hub, demo = false, setupToken = null, realtime = true, ephemeral = false, tickOnRequest = null, trustProxy = 'loopback', staticDir = null, reporter = null, release = null, schedulerMaxAgeMs = 0, requestLog = null, logger = console }) {
   const app = express();
   app.disable('x-powered-by');
   // Behind a reverse proxy (Caddy on the same machine, or Vercel), take the visitor's real address for login limits.
   app.set('trust proxy', trustProxy);
+  if (requestLog) app.use(requestLog.middleware);
   app.use(express.json({ limit: '1mb', verify: (req, _res, buf) => (req.rawBody = buf) }));
   app.use((_req, res, next) => {
     res.set({ 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'same-origin', 'X-Frame-Options': 'DENY' });
@@ -207,6 +208,10 @@ export function createApp({ platform, hub, demo = false, setupToken = null, real
   agency.post('/institutes/:slug/delete', (req, res) => res.json(platform.deleteInstitute(req.params.slug, { confirm: req.body?.confirm, actor: req.user.name })));
   agency.get('/privacy-log', (_req, res) => res.json(platform.listPlatformPrivacyLog()));
   agency.get('/auth-log', (_req, res) => res.json(platform.listAuthLog(200)));
+  agency.get('/request-log', (req, res) => {
+    if (!requestLog) return res.json([]);
+    res.json(requestLog.list({ limit: req.query.limit, userId: req.query.userId ? Number(req.query.userId) : null, from: req.query.from || null }));
+  });
   agency.get('/billing-profile', (_req, res) => res.json(platform.billingProfile()));
   agency.put('/billing-profile', (req, res) => res.json(platform.setBillingProfile(req.body ?? {})));
   agency.get('/institutes/:slug/billing', (req, res) => res.json({ ...platform.billingFor(req.params.slug), payments: platform.listPayments(req.params.slug) }));

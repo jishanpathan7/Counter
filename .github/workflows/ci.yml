@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # Litestream, so the disaster-recovery test (crash, lose the disk, restore) runs too.
+      - name: Install Litestream
+        run: |
+          docker create --name ls litestream/litestream:0.5.18
+          sudo docker cp ls:/usr/local/bin/litestream /usr/local/bin/litestream
+          docker rm ls
+          litestream version
+      - run: npm test
+      - run: npm run build
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: test
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the production image
+        run: docker build --build-arg APP_RELEASE=${GITHUB_SHA::12} -t attendance-alert:ci .
+      - name: Start it and check health
+        run: |
+          docker run -d --name app -p 3001:3001 -e SESSION_SECRET=$(openssl rand -hex 32) -e SETUP_TOKEN=ci attendance-alert:ci
+          for i in $(seq 1 30); do curl -fsS localhost:3001/api/health && exit 0; sleep 1; done
+          docker logs app; exit 1

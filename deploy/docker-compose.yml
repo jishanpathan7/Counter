@@ -13,7 +13,7 @@ services:
     image: attendance-alert:${APP_RELEASE:-latest}
     init: true # passes stop signals on, so the last changes are backed up before exit
     restart: unless-stopped
-    env_file: .env
+    env_file: ${ENV_FILE:-.env} # staging: ENV_FILE=staging.env
     environment:
       DATA_DIR: /data
       TRUST_PROXY: "1" # Caddy is one hop in front: use the visitor's real address for login limits
