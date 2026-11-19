@@ -305,7 +305,7 @@ export function createApp({ platform, hub, demo = false, setupToken = null, real
   // Teacher (or front desk on their behalf) sends the list to the office.
   inst.post('/sessions/:id/submit', async (req, res) => {
     const s = sessionFor(req);
-    await req.svc.submit(s.id);
+    await req.svc.submit(s.id, { actor: req.user.name });
     res.json(sessionView(req, s.id));
   });
   inst.post('/sessions/:id/start-now', MGMT, (req, res) => {
@@ -315,8 +315,16 @@ export function createApp({ platform, hub, demo = false, setupToken = null, real
 
   // students
   inst.get('/students', MGMT, (req, res) => res.json(req.svc.getStudentDirectory({ batchId: req.query.batchId ? Number(req.query.batchId) : null })));
-  inst.get('/students/:id', MGMT, (req, res) => res.json(req.svc.getStudentProfile(Number(req.params.id))));
-  inst.post('/students', MGMT, (req, res) => res.status(201).json(req.svc.createStudent(req.body ?? {})));
+  inst.get('/students/:id', MGMT, (req, res) => {
+    const profile = req.svc.getStudentProfile(Number(req.params.id));
+    req.svc.event('student_viewed', { actor: req.user.name, studentId: profile.id }); // access log
+    res.json(profile);
+  });
+  inst.post('/students', MGMT, (req, res) => {
+    const st = req.svc.createStudent(req.body ?? {});
+    req.svc.event('student_added', { actor: req.user.name, studentId: st.id });
+    res.status(201).json(st);
+  });
   inst.post('/students/import', OWNER, (req, res) => res.json(req.svc.importStudents(req.body ?? {})));
   inst.post('/students/:id/consent', MGMT, (req, res) => {
     const by = req.user.name;
@@ -324,9 +332,14 @@ export function createApp({ platform, hub, demo = false, setupToken = null, real
     res.json({ consent: r });
   });
   inst.post('/consents/record-all', OWNER, (req, res) => res.json(req.svc.recordAllConsents({ batchId: req.body?.batchId ? Number(req.body.batchId) : null, recordedBy: req.user.name })));
-  inst.patch('/students/:id', MGMT, (req, res) => res.json(req.svc.updateStudent(Number(req.params.id), req.body ?? {})));
+  inst.patch('/students/:id', MGMT, (req, res) => {
+    const st = req.svc.updateStudent(Number(req.params.id), req.body ?? {});
+    req.svc.event('student_edited', { actor: req.user.name, studentId: Number(req.params.id) });
+    res.json(st);
+  });
   inst.delete('/students/:id', OWNER, (req, res) => {
     req.svc.deleteStudent(Number(req.params.id));
+    req.svc.event('student_removed', { actor: req.user.name, studentId: Number(req.params.id) });
     res.sendStatus(204);
   });
 
@@ -367,7 +380,7 @@ export function createApp({ platform, hub, demo = false, setupToken = null, real
   // call tasks
   inst.get('/tasks', MGMT, (req, res) => res.json(req.svc.listTasks(req.query.status === 'done' ? 'done' : 'open')));
   inst.post('/tasks/:id/complete', MGMT, (req, res) => {
-    req.svc.completeTask(Number(req.params.id), req.body ?? {});
+    req.svc.completeTask(Number(req.params.id), { ...(req.body ?? {}), actor: req.user.name });
     res.json({ ok: true });
   });
 
@@ -382,6 +395,7 @@ export function createApp({ platform, hub, demo = false, setupToken = null, real
   });
 
   // reports
+  inst.get('/reports/loop-trend', MGMT, (req, res) => res.json(req.svc.getLoopTrend(8)));
   inst.get('/reports', MGMT, (req, res) => res.json(req.svc.getReport({ from: req.query.from, to: req.query.to, batchId: req.query.batchId || null })));
   inst.get('/reports.csv', MGMT, (req, res) => {
     const r = req.svc.getReport({ from: req.query.from, to: req.query.to, batchId: req.query.batchId || null });

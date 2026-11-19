@@ -600,6 +600,9 @@ export class Platform {
         team,
         whatsapp: svc.messenger?.mode ?? 'simulator',
         weekPct: week.totals.pct,
+        loopWeek: { coveredPct: week.loop.coveredPct, absences: week.loop.absences, onTimeMarking: week.loop.onTimeMarking.pct },
+        // "Active" = at least one class sent by a teacher in the last 7 days.
+        activeThisWeek: svc.db.prepare('SELECT COUNT(*) AS n FROM sessions WHERE date >= ? AND submitted_at IS NOT NULL').get(addDays(today, -6)).n > 0,
         weekTrend: week.series.map((d) => d.pct),
         today: { present: t.present, absent: t.absent, leaveLate: t.leaveLate, openTasks: t.openTasks },
       };
@@ -613,6 +616,7 @@ export class Platform {
         mrr: active.reduce((s, i) => s + i.feeMonthly, 0),
         students: institutes.reduce((s, i) => s + i.students, 0),
         alertsMonth: institutes.reduce((s, i) => s + i.alertsMonth, 0),
+        activeThisWeek: institutes.filter((i) => i.activeThisWeek).length,
       },
     };
   }

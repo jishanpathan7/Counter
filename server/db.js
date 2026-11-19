@@ -108,6 +108,20 @@ CREATE TABLE IF NOT EXISTS consent_log (
   at          TEXT NOT NULL
 );
 
+-- What happened and who did it: the alert loop step by step, plus who opened which student's
+-- details (access log). Used for the loop metrics; personal data stays in the other tables.
+CREATE TABLE IF NOT EXISTS events (
+  id         INTEGER PRIMARY KEY,
+  at         TEXT NOT NULL,
+  type       TEXT NOT NULL,
+  actor      TEXT,
+  session_id INTEGER,
+  student_id INTEGER,
+  alert_id   INTEGER,
+  data       TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_events_type_at ON events(type, at);
+CREATE INDEX IF NOT EXISTS idx_events_student ON events(student_id);
 -- Exports and erasures, so the institute can show what was done with personal data and when.
 -- Never holds the personal data itself (an erased student is recorded by number, not name).
 CREATE TABLE IF NOT EXISTS privacy_log (

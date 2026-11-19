@@ -548,3 +548,62 @@ test('consent: no WhatsApp without it, START turns alerts on, STOP turns them of
   const log = service.db.prepare('SELECT status, source FROM consent_log WHERE phone = ? ORDER BY id').all('919000000003');
   assert.deepEqual(log.map((l) => `${l.status}/${l.source}`), ['opted_in/staff', 'cleared/staff', 'opted_in/whatsapp', 'opted_out/whatsapp']);
 });
+
+test('loop metrics: covered absences and guardrails count what really happened', async () => {
+  const t = setup();
+  const { service, ids } = t;
+  service.clearConsent(ids.Meera, { recordedBy: 'test' }); // Meera's parent never agreed
+  // Class starts 4:00 PM (it's 3:55). The teacher sends it at 4:20, ten minutes late.
+  t.advance(25 * 60_000);
+  for (const n of ['Aarav', 'Diya', 'Rohan', 'Meera']) await service.mark(t.session.id, ids[n], 'A');
+  await service.submit(t.session.id, { actor: 'Anil Sir' }); // past the 10-min mark: alerts go now
+  const day = service.today();
+
+  // Aarav's parent replies "leave" within minutes.
+  await service.handleReply({ phone: '9000000001', payload: `LEAVE:${t.student('Aarav').alert.id}` });
+  // Nobody replies for Diya and Rohan: both become calls.
+  t.advance(11 * 60_000);
+  await service.tick();
+  const tasks = service.listTasks('open');
+  const call = (name) => tasks.find((x) => x.studentName === name);
+  // Diya was actually in class (a false alert); Rohan's call is never logged.
+  service.completeTask(call('Diya').id, { outcome: 'present', actor: 'Pooja' });
+
+  const m = service.getLoopMetrics({ from: day, to: day });
+  assert.equal(m.absences, 4);
+  // Sent 20 min after class start: past the 15-minute promise, so none count as covered.
+  assert.equal(m.covered, 0);
+  assert.equal(m.onTimeMarking.pct, 0);
+  assert.equal(m.replies.of, 3, "Meera's parent wasn't messaged (no consent)");
+  assert.equal(m.replies.pct, 33.3);
+  assert.equal(m.falseAlerts.n, 1);
+  assert.equal(m.falseAlerts.pct, 25);
+  assert.equal(m.sameDayCalls.of, 3, "Diya, Rohan and Meera's call-instead");
+  assert.equal(m.sameDayCalls.pct, 33.3);
+  assert.equal(m.delivery.practice, true, 'no delivery receipts without real WhatsApp');
+
+  // The event log tells the story, with who did what.
+  const ev = service.listEvents({ limit: 50 }).reverse();
+  assert.deepEqual(
+    [...new Set(ev.map((e) => e.type))].sort(), // alerts go out in parallel, so their order varies
+    ['alert_blocked', 'alert_sent', 'call_logged', 'class_submitted', 'class_verified', 'escalated', 'reply_received'],
+  );
+  assert.equal(ev[0].type, 'class_submitted');
+  const sub = ev.find((e) => e.type === 'class_submitted');
+  assert.equal(sub.actor, 'Anil Sir');
+  assert.deepEqual(sub.data, { minutesAfterStart: 20, onTime: false });
+  assert.equal(ev.find((e) => e.type === 'call_logged').actor, 'Pooja');
+
+  // Next day, done right: sent on time, parent replies, so the absence is covered.
+  t.advance(24 * 60 * 60_000 - 36 * 60_000); // back to 3:55 PM tomorrow
+  const s2 = service.ensureSession(t.batch.id);
+  t.advance(7 * 60_000); // 4:02 PM
+  await service.mark(s2.id, ids.Rohan, 'A');
+  await service.submit(s2.id);
+  t.advance(8 * 60_000); // 4:10 PM: alerts go out
+  await service.tick();
+  const alert = service.getSessionView(s2.id).students.find((s) => s.name === 'Rohan').alert;
+  await service.handleReply({ phone: '9000000003', payload: `LATE:${alert.id}` });
+  const m2 = service.getLoopMetrics({ from: service.today(), to: service.today() });
+  assert.deepEqual([m2.absences, m2.covered, m2.coveredPct, m2.onTimeMarking.pct], [1, 1, 100, 100]);
+});

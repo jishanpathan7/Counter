@@ -12,6 +12,58 @@ const PRESETS = [
   { id: 'custom', label: 'Custom' },
 ];
 
+const LOOP_ROWS = [
+  { key: 'onTimeMarking', label: 'Classes sent on time by the teacher', more: true, hint: (m) => `${m.n} of ${m.of}` },
+  { key: 'delivery', label: 'WhatsApp messages delivered', more: true, hint: (m) => (m.practice ? 'shown once WhatsApp is connected' : `of ${m.of}`) },
+  { key: 'replies', label: 'Parents who replied on WhatsApp', more: true, hint: (m) => `of ${m.of}` },
+  { key: 'sameDayCalls', label: 'Calls made the same day', more: true, hint: (m) => `of ${m.of}` },
+  { key: 'falseAlerts', label: 'False alerts (the child was actually there)', more: false, hint: (m) => `${m.n}` },
+];
+
+/** The alert loop's own report card: did parents really get told in time, and is anything slipping? */
+function LoopHealth({ loop }) {
+  const { data: trend } = useData('/reports/loop-trend');
+  if (!loop.absences) return null;
+  const ok = (key, v) => v == null || (LOOP_ROWS.find((r) => r.key === key)?.more === false ? v <= loop.goals[key] : v >= loop.goals[key]);
+  return (
+    <section className="card stack">
+      <div className="card-head">
+        <h3>How well parents were told</h3>
+        <span className="muted small">{loop.absences} absences</span>
+      </div>
+      <div className="loop-head">
+        <div className={`loop-big ${ok('coveredPct', loop.coveredPct) ? 's-P' : 's-A'}`}>{loop.coveredPct ?? '–'}%</div>
+        <div>
+          <b>{loop.covered} of {loop.absences} absences covered</b>
+          <div className="muted small">The parent got a WhatsApp within 15 minutes of class starting, and the reply or call was settled the same day. Goal: {loop.goals.coveredPct}% or more.</div>
+        </div>
+      </div>
+      {trend?.length > 0 && (
+        <div className="loop-trend" aria-label="Covered absences, last 8 weeks">
+          {trend.map((w) => (
+            <div key={w.to} className="loop-week" title={`${fmtDate(w.from, { day: 'numeric', month: 'short' })} – ${fmtDate(w.to, { day: 'numeric', month: 'short' })}: ${w.absences ? `${w.covered} of ${w.absences} covered` : 'no absences'}`}>
+              <span style={{ height: `${w.coveredPct == null ? 3 : Math.max(3, Math.round(w.coveredPct * 0.8))}px` }} className={w.coveredPct == null ? 'no-data' : w.coveredPct >= loop.goals.coveredPct ? '' : 'low'} />
+              <i>{fmtDate(w.to, { day: 'numeric', month: 'short' })}</i>
+            </div>
+          ))}
+        </div>
+      )}
+      <ul className="list">
+        {LOOP_ROWS.map((row) => {
+          const m = loop[row.key];
+          const good = ok(row.key, m.pct);
+          return (
+            <li key={row.key} className="list-row">
+              <span className="grow">{row.label}<div className="muted small">{row.hint(m)} · goal {row.more ? `${loop.goals[row.key]}%+` : `under ${loop.goals[row.key]}%`}</div></span>
+              <b className={m.pct == null ? 'muted' : good ? 's-P' : 's-A'}>{m.pct == null ? '–' : `${m.pct}%`}</b>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
 export default function Reports() {
   const { info, slug } = useApp();
   const today = info.today;
@@ -88,6 +140,8 @@ export default function Reports() {
             <Kpi label="Calls made" value={r.calls.done} hint={`${r.calls.unreachable} unreachable`} />
             <Kpi label="Bunks caught" value={r.calls.bunks} tone={r.calls.bunks ? 'bad' : ''} />
           </div>
+
+          <LoopHealth loop={r.loop} />
 
           <section className="card">
             <div className="card-head">

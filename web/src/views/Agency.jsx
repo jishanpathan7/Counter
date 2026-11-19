@@ -154,7 +154,7 @@ export default function Agency({ me, logout, theme, toast }) {
                 <div className="mrr" style={{ color: '#fff' }}>{fmtMoney(t.mrr)}</div>
                 <div className="kpi-label" style={{ color: 'rgba(255,255,255,.85)' }}>Monthly recurring revenue · {fmtMoney(t.mrr * 12)} a year</div>
               </div>
-              <Kpi label="Active institutes" value={`${t.active}/${t.institutes}`} />
+              <Kpi label="Active institutes" value={`${t.active}/${t.institutes}`} hint={`${t.activeThisWeek} sent classes this week`} />
               <Kpi label="Students covered" value={t.students} />
               <Kpi label="WhatsApp alerts this month" value={t.alertsMonth} tone="ok" />
             </div>
@@ -180,7 +180,7 @@ export default function Agency({ me, logout, theme, toast }) {
                     <div className="inst-stats">
                       <div><b>{i.students}</b><span>students</span></div>
                       <div><b>{i.alertsMonth}</b><span>alerts / month</span></div>
-                      <div><b>{i.alertsMonth ? Math.round((i.repliedMonth / i.alertsMonth) * 100) : 0}%</b><span>parents replied</span></div>
+                      <div><b className={i.loopWeek?.coveredPct != null && i.loopWeek.coveredPct < 90 ? 's-A' : ''}>{i.loopWeek?.coveredPct ?? '–'}{i.loopWeek?.coveredPct != null ? '%' : ''}</b><span>absences covered (7 d)</span></div>
                     </div>
                     <div className="row small muted">
                       <span>Today: <b className="s-P">{i.today.present}</b> present · <b className="s-A">{i.today.absent}</b> absent</span>

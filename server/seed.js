@@ -77,6 +77,7 @@ function addBatches(svc, defs) {
  */
 function generateHistory(svc, { days, rates, seed, holidays = [], liveToday = [] }) {
   const rand = rng(seed);
+  const extra = rng(seed + 7919); // separate stream for imperfections, so the main history stays the same
   const pick = (weights) => {
     const total = weights.reduce((s, [, w]) => s + w, 0);
     let r = rand() * total;
@@ -110,8 +111,11 @@ function generateHistory(svc, { days, rates, seed, holidays = [], liveToday = []
         const start = Date.parse(startsAt);
         if (start + 45 * 60_000 > now) continue; // still to come (or live) today
         if (d === today && liveToday.includes(b.id)) continue; // kept open so the live flow can be tried any time
-        const verified = start + 10 * 60_000;
-        const markAt = start + (2 + rand() * 6) * 60_000;
+        // Now and then a teacher sends the list late, so parents hear later than promised.
+        const late = extra() < 0.08;
+        const onTime = 2 + rand() * 6; // always drawn, so the rest of the history doesn't shift
+        const markAt = start + (late ? 15 + extra() * 25 : onTime) * 60_000;
+        const verified = late ? markAt + 60_000 : start + 10 * 60_000;
         const sessionId = Number(insSession.run(b.id, d, startsAt, iso(markAt + 60_000), iso(verified)).lastInsertRowid);
         let n = 0;
         for (const st of studentsOf.all(b.id)) {
@@ -143,7 +147,8 @@ function generateHistory(svc, { days, rates, seed, holidays = [], liveToday = []
           } else {
             const escalated = sent + 10 * 60_000;
             const alertId = Number(insAlert.run(sessionId, st.id, st.parent_phone, 'escalated', iso(sent), null, null, iso(escalated)).lastInsertRowid);
-            const outcome = pick([['bunk', 40], ['leave', 25], ['late', 10], ['unreachable', 25]]);
+            const picked = pick([['bunk', 40], ['leave', 25], ['late', 10], ['unreachable', 25]]);
+            const outcome = extra() < 0.1 ? 'present' : picked; // sometimes the child was there after all
             const done = escalated + (3 + rand() * 20) * 60_000;
             insTask.run(alertId, 'No reply in 10 min', iso(escalated), iso(done), TASK_OUTCOMES[outcome].note);
             updAtt.run(TASK_OUTCOMES[outcome].status, TASK_OUTCOMES[outcome].note, 'staff', iso(done), sessionId, st.id);

@@ -373,6 +373,38 @@ export class AttendanceService {
 
   // ----------------------------------------------------------------- privacy (DPDP)
 
+  /** Append to the event log. Never throws: logging must not break the alert loop. */
+  event(type, { actor = null, sessionId = null, studentId = null, alertId = null, data = null } = {}) {
+    try {
+      this.db
+        .prepare('INSERT INTO events (at, type, actor, session_id, student_id, alert_id, data) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run(this.nowIso(), type, actor, sessionId, studentId, alertId, data == null ? null : JSON.stringify(data));
+    } catch (err) {
+      this.logger.error?.(`Event log write failed: ${err.message}`);
+    }
+  }
+
+  listEvents({ types = null, studentId = null, limit = 200 } = {}) {
+    const where = [];
+    const args = [];
+    if (types?.length) {
+      where.push(`e.type IN (${types.map(() => '?').join(',')})`);
+      args.push(...types);
+    }
+    if (studentId) {
+      where.push('e.student_id = ?');
+      args.push(studentId);
+    }
+    return this.db
+      .prepare(
+        `SELECT e.at, e.type, e.actor, e.session_id AS sessionId, e.student_id AS studentId, e.data, st.name AS studentName
+           FROM events e LEFT JOIN students st ON st.id = e.student_id
+          ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY e.id DESC LIMIT ?`,
+      )
+      .all(...args, Math.min(Number(limit) || 200, 1000))
+      .map((e) => ({ ...e, data: e.data ? JSON.parse(e.data) : null }));
+  }
+
   logPrivacy(actor, action, detail = null) {
     this.db.prepare('INSERT INTO privacy_log (at, actor, action, detail) VALUES (?, ?, ?, ?)').run(this.nowIso(), actor ?? null, action, detail);
   }
@@ -480,6 +512,7 @@ export class AttendanceService {
       counts.calls = run('DELETE FROM tasks WHERE alert_id IN (SELECT id FROM alerts WHERE student_id = ?)', id);
       counts.alerts = run('DELETE FROM alerts WHERE student_id = ?', id);
       counts.attendance = run('DELETE FROM attendance WHERE student_id = ?', id);
+      run('DELETE FROM events WHERE student_id = ?', id);
       run('DELETE FROM students WHERE id = ?', id);
       const siblings = this.db.prepare('SELECT COUNT(*) AS n FROM students WHERE parent_phone = ?').get(st.parent_phone).n;
       counts.messages = 0;
@@ -583,9 +616,14 @@ export class AttendanceService {
    * didn't tap is present. Parents are only ever alerted for a class that was sent, so a
    * forgotten or half-finished list can never message a parent by mistake.
    */
-  async submit(sessionId) {
+  async submit(sessionId, { actor = null } = {}) {
     const session = this.getSessionRow(sessionId);
     const at = this.nowIso();
+    if (!session.submitted_at) {
+      const { verifyAfterMinutes: due } = this.getSettings();
+      const minutes = Math.round((this.now() - Date.parse(session.starts_at)) / 6000) / 10;
+      this.event('class_submitted', { actor, sessionId: session.id, data: { minutesAfterStart: minutes, onTime: minutes <= due } });
+    }
     this.db
       .prepare(
         `INSERT INTO attendance (session_id, student_id, status, note, source, updated_at)
@@ -625,6 +663,7 @@ export class AttendanceService {
       .all(session.id);
 
     const verified = { ...session, verified_at: at };
+    this.event('class_verified', { sessionId: session.id, data: { absent: absentees.length } });
     await mapLimit(absentees, 8, (student) => this.sendAlert(verified, student));
     this.changed();
   }
@@ -646,6 +685,7 @@ export class AttendanceService {
           ? 'No WhatsApp consent recorded for this parent yet'
           : null;
     if (blocked) {
+      this.event('alert_blocked', { sessionId: session.id, studentId: student.id, alertId, data: { reason: consent?.status === 'opted_out' ? 'stop' : 'no_consent' } });
       this.db.prepare("UPDATE alerts SET status = 'failed', error = ? WHERE id = ?").run(blocked, alertId);
       this.createTask(alertId, `Call instead: ${blocked.charAt(0).toLowerCase()}${blocked.slice(1)}`);
       return;
@@ -673,8 +713,10 @@ export class AttendanceService {
       });
       this.markSent(msg, id);
       this.db.prepare("UPDATE alerts SET delivery = 'sent' WHERE id = ?").run(alertId);
+      this.event('alert_sent', { sessionId: session.id, studentId: student.id, alertId, data: { minutesAfterStart: Math.round((this.now() - Date.parse(session.starts_at)) / 6000) / 10 } });
     } catch (err) {
       this.logger.error?.(`WhatsApp alert ${alertId} failed: ${err.message}`);
+      this.event('alert_failed', { sessionId: session.id, studentId: student.id, alertId, data: { code: err.code ?? null } });
       this.db.prepare("UPDATE alerts SET status = 'failed', error = ? WHERE id = ?").run(err.message, alertId);
       this.db.prepare('UPDATE messages SET error = ? WHERE id = ?').run(err.message, msg);
       // The parent still needs to know: hand it to staff straight away.
@@ -749,6 +791,12 @@ export class AttendanceService {
     this.db
       .prepare("UPDATE alerts SET status = 'replied', reply = ?, replied_at = ? WHERE id = ?")
       .run(choice, at, alert.id);
+    this.event('reply_received', {
+      sessionId: alert.session_id,
+      studentId: alert.student_id,
+      alertId: alert.id,
+      data: { choice, minutesAfterAlert: Math.round((Date.parse(at) - Date.parse(alert.sent_at)) / 6000) / 10 },
+    });
     this.db
       .prepare(
         `UPDATE attendance SET status = ?, note = ?, source = 'parent', updated_at = ?
@@ -909,7 +957,7 @@ export class AttendanceService {
       .run(this.nowIso(), outcome, sessionId, studentId);
   }
 
-  completeTask(taskId, { outcome, note } = {}) {
+  completeTask(taskId, { outcome, note, actor = null } = {}) {
     const result = TASK_OUTCOMES[outcome];
     if (!result) throw new HttpError(400, `Outcome must be one of: ${Object.keys(TASK_OUTCOMES).join(', ')}`);
     const task = this.db
@@ -921,6 +969,13 @@ export class AttendanceService {
     const extra = String(note ?? '').trim().slice(0, 200);
     const fullNote = extra ? `${result.note}: ${extra}` : result.note;
     this.db.prepare("UPDATE tasks SET status = 'done', done_at = ?, outcome = ? WHERE id = ?").run(at, fullNote, task.id);
+    this.event('call_logged', {
+      actor,
+      sessionId: task.session_id,
+      studentId: task.student_id,
+      alertId: task.alert_id,
+      data: { outcome, minutesAfterTask: Math.round((Date.parse(at) - Date.parse(task.created_at)) / 6000) / 10 },
+    });
     this.db
       .prepare(
         `UPDATE attendance SET status = ?, note = ?, source = 'staff', updated_at = ?
@@ -954,6 +1009,7 @@ export class AttendanceService {
         .prepare("UPDATE alerts SET status = 'escalated', escalated_at = ? WHERE id = ? AND status = 'sent'")
         .run(this.nowIso(), a.id);
       if (r.changes) {
+        this.event('escalated', { sessionId: a.session_id, studentId: a.student_id, alertId: a.id });
         this.createTask(a.id, `No reply in ${replyTimeoutMinutes} min`);
         escalated++;
       }
@@ -1386,6 +1442,71 @@ export class AttendanceService {
 
   // ---------------------------------------------------------------- reports
 
+  /**
+   * How well the alert loop worked over a date range. The headline is "covered absences": the
+   * parent was told on WhatsApp within 15 minutes of class starting AND the outcome (their reply,
+   * or a logged call) was confirmed the same day. The rest are the guardrails that keep it honest.
+   */
+  getLoopMetrics({ from, to }) {
+    const { verifyAfterMinutes } = this.getSettings();
+    const nowIso = this.nowIso();
+    const pct = (n, d) => (d ? Math.round((n / d) * 1000) / 10 : null);
+    const alerts = this.db
+      .prepare(
+        `SELECT al.id, al.status, al.delivery, al.sent_at, al.replied_at, al.error, se.date, se.starts_at,
+                t.created_at AS task_created, t.done_at AS task_done, a.status AS final_status
+           FROM alerts al JOIN sessions se ON se.id = al.session_id
+           LEFT JOIN tasks t ON t.alert_id = al.id
+           LEFT JOIN attendance a ON a.session_id = al.session_id AND a.student_id = al.student_id
+          WHERE se.date BETWEEN ? AND ?`,
+      )
+      .all(from, to);
+    const sameDay = (iso, date) => Boolean(iso) && localDate(this.tz, Date.parse(iso)) === date;
+    const viaWhatsApp = alerts.filter((a) => !(a.status === 'failed' && /consent|STOP/i.test(a.error ?? '')));
+    const sentOk = viaWhatsApp.filter((a) => a.status !== 'failed');
+    const covered = alerts.filter(
+      (a) =>
+        a.status !== 'failed' &&
+        Date.parse(a.sent_at) - Date.parse(a.starts_at) <= 15 * 60_000 &&
+        (sameDay(a.replied_at, a.date) || sameDay(a.task_done, a.date)),
+    ).length;
+    const tasks = alerts.filter((a) => a.task_created);
+    const sessions = this.db
+      .prepare(
+        `SELECT se.starts_at, se.submitted_at FROM sessions se
+          WHERE se.date BETWEEN ? AND ? AND (se.submitted_at IS NOT NULL OR se.verified_at IS NOT NULL OR se.starts_at < ?)
+            AND EXISTS (SELECT 1 FROM attendance a WHERE a.session_id = se.id)`,
+      )
+      .all(from, to, nowIso);
+    const onTime = sessions.filter((x) => x.submitted_at && Date.parse(x.submitted_at) <= Date.parse(x.starts_at) + verifyAfterMinutes * 60_000).length;
+    const realWhatsApp = this.messenger?.mode === 'whatsapp';
+    return {
+      absences: alerts.length,
+      covered,
+      coveredPct: pct(covered, alerts.length),
+      onTimeMarking: { pct: pct(onTime, sessions.length), n: onTime, of: sessions.length },
+      // Delivery receipts only exist on real WhatsApp; in practice mode every message "arrives".
+      delivery: realWhatsApp
+        ? { pct: pct(sentOk.filter((a) => ['delivered', 'read'].includes(a.delivery)).length, viaWhatsApp.length), of: viaWhatsApp.length }
+        : { pct: null, of: viaWhatsApp.length, practice: true },
+      replies: { pct: pct(sentOk.filter((a) => a.replied_at).length, sentOk.length), of: sentOk.length },
+      falseAlerts: { pct: pct(alerts.filter((a) => a.final_status === 'P').length, alerts.length), n: alerts.filter((a) => a.final_status === 'P').length },
+      sameDayCalls: { pct: pct(tasks.filter((a) => sameDay(a.task_done, a.date)).length, tasks.length), of: tasks.length },
+      goals: { coveredPct: 90, onTimeMarking: 90, delivery: 95, replies: 60, falseAlerts: 1, sameDayCalls: 95 },
+    };
+  }
+
+  /** Covered absences per week, for the trend (weeks end today). */
+  getLoopTrend(weeks = 8) {
+    const today = this.today();
+    return Array.from({ length: weeks }, (_, i) => {
+      const to = addDays(today, -7 * (weeks - 1 - i));
+      const from = addDays(to, -6);
+      const m = this.getLoopMetrics({ from, to });
+      return { from, to, absences: m.absences, covered: m.covered, coveredPct: m.coveredPct };
+    });
+  }
+
   getReport({ from, to, batchId = null }) {
     const today = this.today();
     to = to && /^\d{4}-\d{2}-\d{2}$/.test(to) ? to : today;
@@ -1462,6 +1583,7 @@ export class AttendanceService {
       from,
       to,
       batchId: b,
+      loop: this.getLoopMetrics({ from, to }),
       totals: { ...totals, pct: totals.total ? Math.round(((totals.P + totals.T) / totals.total) * 100) : null },
       series,
       batches,
