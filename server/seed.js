@@ -226,5 +226,7 @@ export function seedDemo(platform) {
   platform.recordPayment('bright-future', { method: 'UPI', reference: 'demo-2', paidAt: addDays(today, -10), recordedBy: 'Agency Admin' });
   platform.setBilling('excel', { plan: 'starter', cycle: 'monthly', paidUntil: addDays(today, -3), legalName: 'Excel Coaching Centre', state: 'Madhya Pradesh' });
   platform.setBilling('toppers', { plan: 'custom', feeMonthly: 12000, paidUntil: null, state: 'Rajasthan' });
+  // The demo institutes are long set up: no first-week checklist (new institutes get one).
+  for (const slug of ['bright-future', 'excel', 'toppers']) platform.service(slug).setSetting('onboarding.testAlertAt', platform.nowIso());
   return true;
 }

@@ -631,6 +631,52 @@ export class AttendanceService {
     return counts;
   }
 
+  /** First-week checklist for a new institute (the team count comes from the platform). */
+  setupChecklist({ teamCount = 0 } = {}) {
+    const raw = this.rawSettings();
+    const one = (sql) => this.db.prepare(sql).get().n;
+    const parents = one('SELECT COUNT(DISTINCT parent_phone) AS n FROM students WHERE active = 1');
+    const agreed = one("SELECT COUNT(DISTINCT st.parent_phone) AS n FROM students st JOIN consents c ON c.phone = st.parent_phone AND c.status = 'opted_in' WHERE st.active = 1");
+    const steps = [
+      { id: 'batches', done: one('SELECT COUNT(*) AS n FROM batches WHERE active = 1') > 0, href: '#/settings/batches' },
+      { id: 'students', done: parents > 0, href: '#/students' },
+      { id: 'team', done: teamCount > 0, href: '#/settings/team' },
+      { id: 'consent', done: parents > 0 && agreed / parents >= 0.8, progress: parents ? `${agreed} of ${parents}` : null, href: '#/students' },
+      { id: 'testAlert', done: Boolean(raw['onboarding.testAlertAt']), href: null },
+      { id: 'firstClass', done: one('SELECT COUNT(*) AS n FROM sessions WHERE submitted_at IS NOT NULL') > 0, href: '#/attendance' },
+      { id: 'whatsapp', done: this.messenger?.mode === 'whatsapp', href: '#/settings/whatsapp', optional: true },
+    ];
+    return { steps, done: steps.filter((x) => x.done).length, dismissed: raw['onboarding.dismissed'] === '1' };
+  }
+
+  dismissSetup() {
+    this.setSetting('onboarding.dismissed', '1');
+    this.changed();
+  }
+
+  /**
+   * Show the owner what a parent receives: a sample absence alert, with the reply buttons, sent to
+   * the owner's own number. No consent needed: it's their own phone and they asked for it.
+   */
+  async sendTestAlert({ phone, name }) {
+    const to = normalizePhone(phone);
+    const s = this.rawSettings();
+    const time = formatTime(this.tz, this.nowIso());
+    const text = renderTemplate(s.alertTemplate, { parent: name || 'Parent', student: 'Aarav (sample)', batch: 'Sample batch', time, institute: s.instituteName });
+    const buttons = Object.entries(REPLY_OPTIONS).map(([key, o]) => ({ id: `${key}:0`, title: o.title }));
+    const msg = this.logMessage({ phone: to, direction: 'out', body: `[Test] ${text}`, buttons });
+    try {
+      const { id } = await this.messenger.send({ to, text, buttons, template: 'alert', params: [name || 'Parent', 'Sample batch', time, 'Aarav (sample)'] });
+      this.markSent(msg, id);
+    } catch (err) {
+      this.db.prepare("UPDATE messages SET error = ?, status = 'failed' WHERE id = ?").run(err.message, msg);
+      throw new HttpError(502, `WhatsApp didn't accept the test message: ${err.message}`);
+    }
+    this.setSetting('onboarding.testAlertAt', this.nowIso());
+    this.changed();
+    return { sentTo: to, mode: this.messenger?.mode ?? 'simulator' };
+  }
+
   /** Who opened, added, changed or removed students' details (access log for the owner). */
   accessLog(limit = 100) {
     return this.listEvents({ types: ['student_viewed', 'student_added', 'student_edited', 'student_removed'], limit });

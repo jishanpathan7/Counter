@@ -102,6 +102,69 @@ function SessionCard({ session, tz, now, isToday }) {
   );
 }
 
+const SETUP_STEPS = {
+  batches: { title: 'Add your batches', text: 'Class name, start time and days.' },
+  students: { title: 'Add students', text: 'One by one, or paste the list from Excel.' },
+  team: { title: 'Add a teacher or front desk', text: 'Each person logs in with their own number and PIN.' },
+  consent: { title: 'Record parent consent', text: 'Tick the signed admission forms, or share the "send START" link.' },
+  testAlert: { title: 'Send yourself a test alert', text: 'See exactly what a parent gets on WhatsApp.' },
+  firstClass: { title: 'Take attendance for one class', text: 'A teacher taps who is absent and sends the list.' },
+  whatsapp: { title: 'Connect WhatsApp', text: 'Until then the app runs in practice mode and no parent is messaged.' },
+};
+
+/** First-week checklist on the owner's Home, until everything is done or it's hidden. */
+function SetupChecklist() {
+  const { api, toast, info } = useApp();
+  const { data, reload } = useData(info.role === 'owner' ? '/setup' : null);
+  const [busy, setBusy] = useState(false);
+  if (!data || data.dismissed) return null;
+  const required = data.steps.filter((x) => !x.optional);
+  if (required.every((x) => x.done)) return null;
+  const testAlert = async () => {
+    setBusy(true);
+    try {
+      const r = await api.post('/setup/test-alert');
+      toast(r.mode === 'whatsapp' ? 'Sent: check WhatsApp on your phone' : 'Sent: open WhatsApp (practice) in the menu to see it');
+      reload();
+    } catch (e) {
+      toast(e.message, 'bad');
+    } finally {
+      setBusy(false);
+    }
+  };
+  const hide = async () => {
+    await api.post('/setup/dismiss').catch(() => {});
+    reload();
+  };
+  return (
+    <section className="card stack">
+      <div className="card-head">
+        <h3>Get set up · {data.done} of {data.steps.length} done</h3>
+        <button className="btn link small" onClick={hide}>Hide</button>
+      </div>
+      <ol className="setup-list">
+        {data.steps.map((x) => {
+          const step = SETUP_STEPS[x.id];
+          return (
+            <li key={x.id} className={x.done ? 'done' : ''}>
+              <span className="setup-tick" aria-hidden="true">{x.done ? <Icon name="check" size={14} /> : null}</span>
+              <div className="grow">
+                <b>{step.title}</b>{x.optional ? <span className="muted small"> · optional to start</span> : null}
+                <div className="muted small">{x.progress ? `${x.progress} parents agreed. ` : ''}{step.text}</div>
+              </div>
+              {!x.done && (x.id === 'testAlert' ? (
+                <button className="btn small" disabled={busy} onClick={testAlert}>Send test</button>
+              ) : x.href ? (
+                <a className="btn small ghost" href={x.href}>Go</a>
+              ) : null)}
+            </li>
+          );
+        })}
+      </ol>
+    </section>
+  );
+}
+
 function Impact({ report }) {
   const a = report?.alerts;
   if (!a?.sent) return null;
@@ -216,6 +279,7 @@ export default function Dashboard() {
           </div>
         ) : null;
       })()}
+      {isToday && <SetupChecklist />}
       {isToday && <Impact report={report} />}
 
       <div className="dash-grid">

@@ -484,6 +484,15 @@ export function createApp({ platform, hub, demo = false, setupToken = null, real
     res.status(201).json(platform.addMember(req.params.slug, req.body ?? {}));
   });
 
+  // first-week checklist (owner)
+  const teamCount = (slug) => platform.listTeam(slug).filter((m) => m.role !== 'owner').length;
+  inst.get('/setup', OWNER, (req, res) => res.json(req.svc.setupChecklist({ teamCount: teamCount(req.params.slug) })));
+  inst.post('/setup/dismiss', OWNER, (req, res) => {
+    req.svc.dismissSetup();
+    res.json({ ok: true });
+  });
+  inst.post('/setup/test-alert', OWNER, async (req, res) => res.json(await req.svc.sendTestAlert({ phone: req.user.phone, name: req.user.name })));
+
   // plan & billing (owner)
   inst.get('/billing', OWNER, (req, res) => res.json({ ...platform.billingFor(req.params.slug), payments: platform.listPayments(req.params.slug) }));
   inst.get('/billing/invoices/:id', OWNER, (req, res) => res.type('html').send(platform.invoice(Number(req.params.id), { slug: req.params.slug })));
