@@ -7,7 +7,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { openDb } from './db.js';
 import { AttendanceService, HttpError, mapLimit, normalizePhone } from './service.js';
 import { messengerFromConfig } from './messaging.js';
-import { addDays } from './time.js';
+import { addDays, localDate } from './time.js';
+import { addMonths, addDaysTo, billingState, FAIR_USE_ALERTS_PER_STUDENT, financialYear, gstFor, invoiceHtml, periodPrice, PLANS } from './billing.js';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -62,6 +63,25 @@ CREATE TABLE IF NOT EXISTS memberships (
   role         TEXT NOT NULL CHECK (role IN ('owner', 'staff', 'teacher')),
   batch_ids    TEXT NOT NULL DEFAULT '[]',     -- teachers: the batches they take
   PRIMARY KEY (user_id, institute_id)
+);
+-- Payments received. Kept even if the institute is later deleted: invoices are tax records.
+CREATE TABLE IF NOT EXISTS payments (
+  id             INTEGER PRIMARY KEY,
+  institute_id   INTEGER,
+  institute_slug TEXT NOT NULL,
+  buyer          TEXT NOT NULL,                 -- JSON: name, legal name, GSTIN, state, address at the time
+  description    TEXT NOT NULL,
+  base_amount    REAL NOT NULL,                 -- before GST
+  tax_lines      TEXT NOT NULL,                 -- JSON
+  total_amount   REAL NOT NULL,
+  period_from    TEXT NOT NULL,
+  period_to      TEXT NOT NULL,
+  method         TEXT,
+  reference      TEXT,
+  paid_at        TEXT NOT NULL,                 -- 'YYYY-MM-DD'
+  invoice_no     TEXT NOT NULL UNIQUE,
+  recorded_by    TEXT,
+  created_at     TEXT NOT NULL
 );
 -- Institutes deleted for good (the institute's own privacy log goes with its database).
 CREATE TABLE IF NOT EXISTS privacy_log (
@@ -161,6 +181,23 @@ export class Platform {
     if (dataDir) this.db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
     this.db.exec('PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;');
     this.db.exec(SCHEMA);
+    this.migrate();
+  }
+
+  migrate() {
+    const has = (t, c) => this.db.prepare(`PRAGMA table_info(${t})`).all().some((x) => x.name === c);
+    if (!has('institutes', 'plan')) {
+      // Institutes from before plans existed keep working exactly as before: no limits, no due date.
+      this.db.exec(`ALTER TABLE institutes ADD COLUMN plan TEXT NOT NULL DEFAULT 'custom';
+        ALTER TABLE institutes ADD COLUMN billing_cycle TEXT NOT NULL DEFAULT 'monthly';
+        ALTER TABLE institutes ADD COLUMN paid_until TEXT;
+        ALTER TABLE institutes ADD COLUMN payment_link TEXT;
+        ALTER TABLE institutes ADD COLUMN billing TEXT;`);
+    }
+  }
+
+  today() {
+    return localDate(this.tz, this.clock());
   }
 
   nowIso() {
@@ -307,7 +344,20 @@ export class Platform {
   }
 
   publicInstitute(i) {
-    return { id: i.id, slug: i.slug, name: i.name, city: i.city, feeMonthly: i.fee_monthly, status: i.status, createdAt: i.created_at };
+    return {
+      id: i.id,
+      slug: i.slug,
+      name: i.name,
+      city: i.city,
+      feeMonthly: i.fee_monthly,
+      status: i.status,
+      createdAt: i.created_at,
+      plan: i.plan,
+      billingCycle: i.billing_cycle,
+      paidUntil: i.paid_until,
+      paymentLink: i.payment_link,
+      billing: { ...billingState({ plan: i.plan, paidUntil: i.paid_until }, this.today()) },
+    };
   }
 
   institute(slug) {
@@ -331,8 +381,8 @@ export class Platform {
       ownerId = existing ? existing.id : this.createUser(owner).id;
     }
     const r = this.db
-      .prepare('INSERT INTO institutes (slug, name, city, fee_monthly, created_at) VALUES (?, ?, ?, ?, ?)')
-      .run(sl, n, String(city ?? '').trim().slice(0, 60) || null, Math.round(fee), this.nowIso());
+      .prepare("INSERT INTO institutes (slug, name, city, fee_monthly, created_at, plan, paid_until) VALUES (?, ?, ?, ?, ?, 'trial', ?)")
+      .run(sl, n, String(city ?? '').trim().slice(0, 60) || null, Math.round(fee), this.nowIso(), addDaysTo(this.today(), PLANS.trial.days));
     if (ownerId) {
       this.db.prepare("INSERT INTO memberships (user_id, institute_id, role) VALUES (?, ?, 'owner')").run(ownerId, Number(r.lastInsertRowid));
     }
@@ -353,6 +403,159 @@ export class Platform {
     if (name !== i.name) this.service(slug).updateSettings({ instituteName: name });
     this.onChange(slug);
     return this.publicInstitute(this.institute(slug));
+  }
+
+  // ---------------------------------------------------------------- billing
+
+  /** The agency's own details for invoices (legal name, address, GSTIN, state, SAC code, invoice prefix). */
+  billingProfile() {
+    return { legalName: '', address: '', gstin: '', state: '', sac: '', invoicePrefix: 'INV', upiId: '', ...JSON.parse(this.meta('billingProfile') || '{}') };
+  }
+
+  setBillingProfile(patch = {}) {
+    const cur = this.billingProfile();
+    const next = { ...cur };
+    for (const k of ['legalName', 'address', 'gstin', 'state', 'sac', 'invoicePrefix', 'upiId']) {
+      if (patch[k] === undefined) continue;
+      const v = String(patch[k] ?? '').trim().slice(0, k === 'address' ? 300 : 80);
+      if (k === 'gstin' && v && !/^\d{2}[A-Z0-9]{13}$/i.test(v)) throw new HttpError(400, 'GSTIN should be 15 characters, starting with the 2-digit state code');
+      next[k] = k === 'gstin' ? v.toUpperCase() : v;
+    }
+    next.invoicePrefix = (next.invoicePrefix || 'INV').replace(/[^A-Za-z0-9-]/g, '').slice(0, 10) || 'INV';
+    this.setMeta('billingProfile', JSON.stringify(next));
+    return next;
+  }
+
+  /** Plan, limits, usage this month and payment state for one institute. */
+  billingFor(slug) {
+    const i = this.institute(slug);
+    const plan = PLANS[i.plan] ?? PLANS.custom;
+    const svc = this.service(slug);
+    const monthStart = `${this.today().slice(0, 8)}01`;
+    const students = svc.db.prepare('SELECT COUNT(*) AS n FROM students WHERE active = 1').get().n;
+    const alertsMonth = svc.db.prepare('SELECT COUNT(*) AS n FROM alerts al JOIN sessions se ON se.id = al.session_id WHERE se.date >= ?').get(monthStart).n;
+    const messagesMonth = svc.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE direction = 'out' AND created_at >= ?").get(`${monthStart}T00:00:00`).n;
+    const logins = this.db.prepare('SELECT COUNT(*) AS n FROM memberships WHERE institute_id = ?').get(i.id).n;
+    const price = periodPrice(i.plan, i.billing_cycle, i.plan === 'custom' ? i.fee_monthly : null);
+    return {
+      plan: i.plan,
+      planName: plan.name,
+      cycle: i.billing_cycle,
+      price,
+      paidUntil: i.paid_until,
+      paymentLink: this.paymentLinkFor(i, price),
+      ...billingState({ plan: i.plan, paidUntil: i.paid_until }, this.today()),
+      limits: { students: plan.students, logins: plan.logins, fullReports: plan.fullReports },
+      usage: { students, logins, alertsMonth, messagesMonth, fairUseAlerts: students * FAIR_USE_ALERTS_PER_STUDENT },
+      buyer: JSON.parse(i.billing || '{}'),
+      plans: Object.entries(PLANS).filter(([k]) => k !== 'custom' && k !== 'trial').map(([k, v]) => ({ id: k, name: v.name, monthly: v.monthly, students: v.students })),
+    };
+  }
+
+  /** The institute's own payment link, or a UPI link built from the agency's UPI ID and the amount due. */
+  paymentLinkFor(i, price) {
+    if (i.payment_link) return i.payment_link;
+    const upi = this.billingProfile().upiId;
+    if (!upi || !price) return null;
+    const total = gstFor(price, { sellerGstin: this.billingProfile().gstin, sellerState: this.billingProfile().state, buyerState: JSON.parse(i.billing || '{}').state }).total;
+    const name = encodeURIComponent(this.billingProfile().legalName || 'Attendance Alert');
+    return `upi://pay?pa=${encodeURIComponent(upi)}&pn=${name}&am=${total.toFixed(2)}&cu=INR&tn=${encodeURIComponent(`${i.name} ${PLANS[i.plan]?.name ?? ''}`.trim())}`;
+  }
+
+  /** Agency: change an institute's plan, cycle, paid-until date, payment link or billing details. */
+  setBilling(slug, patch = {}) {
+    const i = this.institute(slug);
+    const plan = patch.plan !== undefined ? String(patch.plan) : i.plan;
+    if (!PLANS[plan]) throw new HttpError(400, 'Unknown plan');
+    const cycle = patch.cycle !== undefined ? String(patch.cycle) : i.billing_cycle;
+    if (!['monthly', 'yearly'].includes(cycle)) throw new HttpError(400, 'Billing must be monthly or yearly');
+    let paidUntil = patch.paidUntil !== undefined ? patch.paidUntil || null : i.paid_until;
+    if (paidUntil && !/^\d{4}-\d{2}-\d{2}$/.test(paidUntil)) throw new HttpError(400, 'Paid-until must be a date');
+    const link = patch.paymentLink !== undefined ? String(patch.paymentLink || '').trim() || null : i.payment_link;
+    if (link && !/^(https:\/\/|upi:\/\/)/i.test(link)) throw new HttpError(400, 'The payment link should start with https:// or upi://');
+    const buyer = { ...JSON.parse(i.billing || '{}') };
+    for (const k of ['legalName', 'gstin', 'state', 'address']) {
+      if (patch[k] !== undefined) buyer[k] = String(patch[k] ?? '').trim().slice(0, k === 'address' ? 300 : 80);
+    }
+    if (buyer.gstin && !/^\d{2}[A-Z0-9]{13}$/i.test(buyer.gstin)) throw new HttpError(400, "The institute's GSTIN should be 15 characters");
+    if (buyer.gstin) buyer.gstin = buyer.gstin.toUpperCase();
+    // A custom plan keeps its agreed monthly fee; the others use the plan's price.
+    const fee = plan === 'custom' ? (patch.feeMonthly !== undefined ? Math.max(0, Math.round(Number(patch.feeMonthly) || 0)) : i.fee_monthly) : PLANS[plan].monthly;
+    if (plan === 'trial' && i.plan !== 'trial' && patch.paidUntil === undefined) paidUntil = addDaysTo(this.today(), PLANS.trial.days);
+    this.db
+      .prepare('UPDATE institutes SET plan = ?, billing_cycle = ?, paid_until = ?, payment_link = ?, billing = ?, fee_monthly = ? WHERE id = ?')
+      .run(plan, cycle, paidUntil, link, JSON.stringify(buyer), fee, i.id);
+    this.onChange(slug);
+    return this.billingFor(slug);
+  }
+
+  /**
+   * Agency: a payment came in. Extends the paid-until date by one period (from the old date if it
+   * hasn't passed, otherwise from today) and issues the next invoice number for the financial year.
+   */
+  recordPayment(slug, { amount, method = '', reference = '', paidAt = null, recordedBy = null } = {}) {
+    const i = this.institute(slug);
+    if (i.plan === 'trial') throw new HttpError(409, 'Move the institute to a paid plan first');
+    const date = paidAt && /^\d{4}-\d{2}-\d{2}$/.test(paidAt) ? paidAt : this.today();
+    const base = amount !== undefined && amount !== '' ? Number(amount) : periodPrice(i.plan, i.billing_cycle, i.plan === 'custom' ? i.fee_monthly : null);
+    if (!Number.isFinite(base) || base <= 0 || base > 10_000_000) throw new HttpError(400, 'Enter the amount before GST');
+    const seller = this.billingProfile();
+    const buyer = { name: i.name, ...JSON.parse(i.billing || '{}') };
+    const gst = gstFor(Math.round(base * 100) / 100, { sellerGstin: seller.gstin, sellerState: seller.state, buyerState: buyer.state });
+    const from = i.paid_until && i.paid_until >= date ? addDaysTo(i.paid_until, 1) : date;
+    const to = addDaysTo(i.billing_cycle === 'yearly' ? addMonths(from, 12) : addMonths(from, 1), -1);
+    const fy = financialYear(date);
+    const seq = this.db.prepare('SELECT COUNT(*) AS n FROM payments WHERE invoice_no LIKE ?').get(`${seller.invoicePrefix}/${fy}/%`).n + 1;
+    const invoiceNo = `${seller.invoicePrefix}/${fy}/${String(seq).padStart(4, '0')}`;
+    const description = `Attendance Alert ${PLANS[i.plan].name} plan (${i.billing_cycle})`;
+    const r = this.db
+      .prepare(
+        `INSERT INTO payments (institute_id, institute_slug, buyer, description, base_amount, tax_lines, total_amount, period_from, period_to, method, reference, paid_at, invoice_no, recorded_by, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(i.id, slug, JSON.stringify(buyer), description, Math.round(base * 100) / 100, JSON.stringify(gst.lines), gst.total, from, to, String(method).slice(0, 40), String(reference).slice(0, 80), date, invoiceNo, recordedBy, this.nowIso());
+    this.db.prepare('UPDATE institutes SET paid_until = ? WHERE id = ?').run(to, i.id);
+    this.onChange(slug);
+    return { id: Number(r.lastInsertRowid), invoiceNo, paidUntil: to, total: gst.total };
+  }
+
+  listPayments(slug) {
+    return this.db
+      .prepare('SELECT id, invoice_no AS invoiceNo, paid_at AS paidAt, total_amount AS total, period_from AS periodFrom, period_to AS periodTo, method FROM payments WHERE institute_slug = ? ORDER BY id DESC')
+      .all(slug);
+  }
+
+  invoice(paymentId, { slug = null } = {}) {
+    const p = this.db.prepare('SELECT * FROM payments WHERE id = ?').get(paymentId);
+    if (!p || (slug && p.institute_slug !== slug)) throw new HttpError(404, 'Invoice not found');
+    return invoiceHtml(
+      {
+        invoiceNo: p.invoice_no,
+        paidAt: p.paid_at,
+        description: p.description,
+        periodFrom: p.period_from,
+        periodTo: p.period_to,
+        baseAmount: p.base_amount,
+        taxLines: JSON.parse(p.tax_lines),
+        totalAmount: p.total_amount,
+        method: p.method,
+        reference: p.reference,
+        buyer: JSON.parse(p.buyer),
+      },
+      this.billingProfile(),
+    );
+  }
+
+  /** Limits from the plan, checked before adding students or team members. */
+  checkLimit(slug, kind, adding = 1) {
+    const b = this.billingFor(slug);
+    const cap = b.limits[kind];
+    if (cap == null) return;
+    const used = b.usage[kind];
+    if (used + adding > cap) {
+      const what = kind === 'students' ? 'students' : 'team logins';
+      throw new HttpError(402, `The ${b.planName} plan includes up to ${cap} ${what} (you have ${used}). Ask your provider to move you to a bigger plan.`);
+    }
   }
 
   /**
@@ -438,7 +641,11 @@ export class Platform {
 
   /** One slow institute (or a slow WhatsApp call) must not hold up the others: run a few at once. */
   async tickAll() {
-    const slugs = this.db.prepare("SELECT slug FROM institutes WHERE status = 'active'").all().map((i) => i.slug);
+    const slugs = this.db
+      .prepare("SELECT slug, plan, paid_until FROM institutes WHERE status = 'active'")
+      .all()
+      .filter((i) => billingState({ plan: i.plan, paidUntil: i.paid_until }, this.today()).state !== 'lapsed')
+      .map((i) => i.slug);
     await mapLimit(slugs, 4, async (slug) => {
       try {
         await this.service(slug).tick();
@@ -613,7 +820,10 @@ export class Platform {
       totals: {
         institutes: institutes.length,
         active: active.length,
-        mrr: active.reduce((s, i) => s + i.feeMonthly, 0),
+        // Revenue counts paying institutes only; trials are listed separately.
+        mrr: active.filter((i) => i.plan !== 'trial').reduce((s, i) => s + i.feeMonthly, 0),
+        trials: active.filter((i) => i.plan === 'trial').length,
+        overdue: active.filter((i) => ['due', 'readonly', 'lapsed'].includes(i.billing.state)).length,
         students: institutes.reduce((s, i) => s + i.students, 0),
         alertsMonth: institutes.reduce((s, i) => s + i.alertsMonth, 0),
         activeThisWeek: institutes.filter((i) => i.activeThisWeek).length,

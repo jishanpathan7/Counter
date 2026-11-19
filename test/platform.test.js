@@ -50,7 +50,7 @@ test('demo seed builds three institutes with history', async (tt) => {
   const o = platform.agencyOverview();
   assert.equal(o.totals.institutes, 3);
   assert.equal(o.totals.active, 2);
-  assert.equal(o.totals.mrr, 18000);
+  assert.equal(o.totals.mrr, 1999 + 999, 'Standard + Starter');
   const r = platform.service('bright-future').getReport({});
   assert.ok(r.totals.total > 300, 'a month of attendance');
   assert.ok(r.alerts.sent > 20);
@@ -135,7 +135,10 @@ test('agency creates an institute with a new owner who can log in', async (tt) =
   });
   assert.equal(r.status, 201);
   assert.equal(r.body.slug, 'sharma-tutorials');
-  assert.equal((await agency.call('GET', '/api/agency/overview')).body.totals.mrr, 27000);
+  const totals = (await agency.call('GET', '/api/agency/overview')).body.totals;
+  assert.equal(totals.mrr, 1999 + 999, 'a new institute starts on the free trial');
+  assert.equal(totals.trials, 1);
+  assert.equal(r.body.plan, 'trial');
   const owner = client();
   const login = await owner.login('9822000000', '583920');
   assert.deepEqual(login.body.memberships.map((m) => [m.slug, m.role]), [['sharma-tutorials', 'owner']]);

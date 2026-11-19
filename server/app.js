@@ -206,6 +206,12 @@ export function createApp({ platform, hub, demo = false, setupToken = null, real
   agency.patch('/institutes/:slug', (req, res) => res.json(platform.updateInstitute(req.params.slug, req.body ?? {})));
   agency.post('/institutes/:slug/delete', (req, res) => res.json(platform.deleteInstitute(req.params.slug, { confirm: req.body?.confirm, actor: req.user.name })));
   agency.get('/privacy-log', (_req, res) => res.json(platform.listPlatformPrivacyLog()));
+  agency.get('/billing-profile', (_req, res) => res.json(platform.billingProfile()));
+  agency.put('/billing-profile', (req, res) => res.json(platform.setBillingProfile(req.body ?? {})));
+  agency.get('/institutes/:slug/billing', (req, res) => res.json({ ...platform.billingFor(req.params.slug), payments: platform.listPayments(req.params.slug) }));
+  agency.patch('/institutes/:slug/billing', (req, res) => res.json(platform.setBilling(req.params.slug, req.body ?? {})));
+  agency.post('/institutes/:slug/payments', (req, res) => res.status(201).json(platform.recordPayment(req.params.slug, { ...(req.body ?? {}), recordedBy: req.user.name })));
+  agency.get('/payments/:id/invoice', (req, res) => res.type('html').send(platform.invoice(Number(req.params.id))));
   app.use('/api/agency', agency);
 
   // ------------------------------------------------------------------ one institute
@@ -214,6 +220,15 @@ export function createApp({ platform, hub, demo = false, setupToken = null, real
     const m = platform.membership(req.user, req.params.slug);
     if (!m) throw new HttpError(404, 'Institute not found');
     if (m.status === 'paused' && !req.user.is_agency) throw new HttpError(403, 'This institute is paused. Contact your service provider.');
+    // Late payment: the agency always gets in. After 14 days the institute is paused; between 8 and
+    // 14 days setup changes wait, but attendance, alerts, replies and calls keep working.
+    const bill = m.billing?.state;
+    if (!req.user.is_agency && bill === 'lapsed') {
+      throw new HttpError(402, 'This institute is paused because the subscription has not been paid. Contact your service provider.');
+    }
+    if (!req.user.is_agency && bill === 'readonly' && req.method !== 'GET' && !/^\/(sessions|tasks|simulator)\//.test(req.path)) {
+      throw new HttpError(402, 'Payment is overdue, so changes to setup are paused until it is paid. Attendance and WhatsApp alerts keep working.');
+    }
     req.member = m;
     req.svc = platform.service(req.params.slug);
     next();
@@ -254,6 +269,10 @@ export function createApp({ platform, hub, demo = false, setupToken = null, real
       // Parents opt in by messaging START to this number (wa.me link / QR on the admission form).
       optInPhone: String(req.svc.getWhatsAppConfig().displayPhone || '').replace(/\D/g, '') || null,
       requireConsent: req.svc.getSettings().requireConsent,
+      billing: role === 'teacher' ? null : (() => {
+        const b = platform.billingFor(slug);
+        return { state: b.state, daysLeft: b.daysLeft, daysLate: b.daysLate, planName: b.planName, paymentLink: role === 'owner' ? b.paymentLink : null, paidUntil: b.paidUntil };
+      })(),
     });
   });
 
@@ -321,11 +340,18 @@ export function createApp({ platform, hub, demo = false, setupToken = null, real
     res.json(profile);
   });
   inst.post('/students', MGMT, (req, res) => {
+    platform.checkLimit(req.params.slug, 'students');
     const st = req.svc.createStudent(req.body ?? {});
     req.svc.event('student_added', { actor: req.user.name, studentId: st.id });
     res.status(201).json(st);
   });
-  inst.post('/students/import', OWNER, (req, res) => res.json(req.svc.importStudents(req.body ?? {})));
+  inst.post('/students/import', OWNER, (req, res) => {
+    if (!req.body?.dryRun) {
+      const preview = req.svc.importStudents({ ...(req.body ?? {}), dryRun: true });
+      platform.checkLimit(req.params.slug, 'students', preview.rows.filter((r) => !r.error).length);
+    }
+    res.json(req.svc.importStudents(req.body ?? {}));
+  });
   inst.post('/students/:id/consent', MGMT, (req, res) => {
     const by = req.user.name;
     const r = req.body?.action === 'clear' ? req.svc.clearConsent(Number(req.params.id), { recordedBy: by }) : req.svc.recordConsent(Number(req.params.id), { recordedBy: by });
@@ -396,6 +422,16 @@ export function createApp({ platform, hub, demo = false, setupToken = null, real
 
   // reports
   inst.get('/reports/loop-trend', MGMT, (req, res) => res.json(req.svc.getLoopTrend(8)));
+  const fullReports = (req) => {
+    if (platform.billingFor(req.params.slug).limits.fullReports) return;
+    const from = req.query.from && Date.parse(req.query.from);
+    const to = req.query.to ? Date.parse(req.query.to) : Date.now();
+    if (req.path.endsWith('.csv') || (from && to - from > 31 * 86_400_000)) {
+      throw new HttpError(402, 'Reports longer than a month and CSV downloads are part of the Standard plan.');
+    }
+  };
+  inst.get('/reports', MGMT, (req, res, next) => (fullReports(req), next()));
+  inst.get('/reports.csv', MGMT, (req, res, next) => (fullReports(req), next()));
   inst.get('/reports', MGMT, (req, res) => res.json(req.svc.getReport({ from: req.query.from, to: req.query.to, batchId: req.query.batchId || null })));
   inst.get('/reports.csv', MGMT, (req, res) => {
     const r = req.svc.getReport({ from: req.query.from, to: req.query.to, batchId: req.query.batchId || null });
@@ -434,7 +470,14 @@ export function createApp({ platform, hub, demo = false, setupToken = null, real
 
   // team
   inst.get('/team', OWNER, (req, res) => res.json(platform.listTeam(req.params.slug)));
-  inst.post('/team', OWNER, (req, res) => res.status(201).json(platform.addMember(req.params.slug, req.body ?? {})));
+  inst.post('/team', OWNER, (req, res) => {
+    platform.checkLimit(req.params.slug, 'logins');
+    res.status(201).json(platform.addMember(req.params.slug, req.body ?? {}));
+  });
+
+  // plan & billing (owner)
+  inst.get('/billing', OWNER, (req, res) => res.json({ ...platform.billingFor(req.params.slug), payments: platform.listPayments(req.params.slug) }));
+  inst.get('/billing/invoices/:id', OWNER, (req, res) => res.type('html').send(platform.invoice(Number(req.params.id), { slug: req.params.slug })));
   inst.patch('/team/:userId', OWNER, (req, res) => res.json(platform.updateMember(req.params.slug, Number(req.params.userId), req.body ?? {})));
   inst.delete('/team/:userId', OWNER, (req, res) => {
     if (Number(req.params.userId) === req.user.id) throw new HttpError(409, "You can't remove yourself");

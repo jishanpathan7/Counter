@@ -44,6 +44,30 @@ function useToast() {
   return [toast, show];
 }
 
+/** Trial ending or payment late: say so plainly, with a way to pay. Never shown to teachers. */
+function BillingBanner({ info }) {
+  const b = info.billing;
+  if (!b) return null;
+  const owner = info.role === 'owner';
+  let text = null;
+  let tone = 'warn';
+  if (b.state === 'trial' && b.daysLeft != null && b.daysLeft <= 7) text = b.daysLeft ? `The free trial ends in ${b.daysLeft} day${b.daysLeft === 1 ? '' : 's'}.` : 'The free trial ends today.';
+  if (b.state === 'due') text = `Payment is ${b.daysLate} day${b.daysLate === 1 ? '' : 's'} late. Everything keeps working for now.`;
+  if (b.state === 'readonly') {
+    tone = 'bad';
+    text = `Payment is ${b.daysLate} days overdue, so setup changes are paused. Attendance and WhatsApp alerts keep working. After 14 days the account is paused.`;
+  }
+  if (!text) return null;
+  return (
+    <div className={`banner ${tone}`} style={{ marginBottom: 16 }}>
+      <Icon name="alert" />
+      <span className="grow">{text} {!owner && 'Please tell the owner.'}</span>
+      {owner && b.paymentLink && <a className="btn small primary" href={b.paymentLink} target="_blank" rel="noreferrer">Pay now</a>}
+      {owner && <a className="btn small ghost" href="#/settings/billing">Plan & billing</a>}
+    </div>
+  );
+}
+
 /** Phone tab bar: the four most important places, the rest under "More" (no sideways scrolling). */
 function MobileBar({ nav, current, openTasks }) {
   const [open, setOpen] = useState(false);
@@ -226,6 +250,7 @@ function InstituteApp({ slug, me, logout, theme }) {
             <button className="x" onClick={logout} aria-label="Log out"><Icon name="logout" /></button>
           </header>
           <main className="main">
+            <BillingBanner info={info} />
             <View key={current.id} />
           </main>
         </div>

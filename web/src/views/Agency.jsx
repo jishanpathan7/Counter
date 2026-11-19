@@ -8,7 +8,7 @@ function slugify(s) {
 }
 
 function NewInstitute({ onClose, onDone, toast }) {
-  const [f, setF] = useState({ name: '', slug: '', city: '', feeMonthly: 10000, ownerName: '', ownerPhone: '', ownerPin: '' });
+  const [f, setF] = useState({ name: '', slug: '', city: '', feeMonthly: 0, ownerName: '', ownerPhone: '', ownerPin: '' });
   const [slugTouched, setSlugTouched] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -39,11 +39,10 @@ function NewInstitute({ onClose, onDone, toast }) {
             <input className="input" value={f.slug} onChange={(e) => { setSlugTouched(true); setF({ ...f, slug: slugify(e.target.value) }); }} required />
             <span className="hint">/i/{f.slug || 'name'}</span>
           </label>
-          <label className="field">
-            Monthly fee (₹)
-            <input className="input" type="number" min="0" step="1" value={f.feeMonthly} onChange={set('feeMonthly')} />
-            <span className="hint">What this institute pays you</span>
-          </label>
+          <div className="field">
+            Plan
+            <span className="hint" style={{ marginTop: 6 }}>Starts with a 30-day free trial (up to 100 students). Choose a plan afterwards from the institute's card.</span>
+          </div>
         </div>
         <div className="divider" />
         <div>
@@ -65,28 +64,164 @@ function NewInstitute({ onClose, onDone, toast }) {
   );
 }
 
-function EditFee({ inst, onClose, onDone }) {
-  const [fee, setFee] = useState(inst.feeMonthly);
+export const BILL_LABEL = { ok: 'Paid', trial: 'Trial', due: 'Payment due', readonly: 'Overdue: read-only', lapsed: 'Paused: unpaid' };
+export const billTone = (st) => (st === 'ok' ? 'ok' : st === 'trial' ? '' : st === 'due' ? 'warn' : 'bad');
+const fmtDay = (d) => (d ? new Date(`${d}T00:00:00`).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : '—');
+
+/** Plan, paid-until, payment link, the institute's invoice details, and payments with invoices. */
+function BillingPanel({ inst, onClose, onDone, toast }) {
+  const [b, setB] = useState(null);
+  const [f, setF] = useState(null);
+  const [pay, setPay] = useState({ amount: '', method: 'UPI', reference: '', paidAt: '' });
   const [error, setError] = useState('');
+  const load = useCallback(
+    () =>
+      api.get(`/agency/institutes/${inst.slug}/billing`).then((r) => {
+        setB(r);
+        setF({ plan: r.plan, cycle: r.cycle, paidUntil: r.paidUntil ?? '', paymentLink: inst.paymentLink ?? '', feeMonthly: inst.feeMonthly, ...r.buyer });
+      }),
+    [inst.slug, inst.paymentLink, inst.feeMonthly],
+  );
+  useEffect(() => {
+    load().catch((e) => setError(e.message));
+  }, [load]);
+  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
   const save = async (e) => {
     e.preventDefault();
+    setError('');
     try {
-      await api.patch(`/agency/institutes/${inst.slug}`, { feeMonthly: Number(fee) });
+      await api.patch(`/agency/institutes/${inst.slug}/billing`, { ...f, feeMonthly: Number(f.feeMonthly) || 0 });
+      toast('Billing saved');
+      await load();
+      onDone();
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+  const record = async (e) => {
+    e.preventDefault();
+    setError('');
+    try {
+      const r = await api.post(`/agency/institutes/${inst.slug}/payments`, { ...pay, amount: pay.amount === '' ? undefined : Number(pay.amount) });
+      toast(`Payment recorded: invoice ${r.invoiceNo}, paid until ${fmtDay(r.paidUntil)}`);
+      setPay({ amount: '', method: 'UPI', reference: '', paidAt: '' });
+      await load();
       onDone();
     } catch (err) {
       setError(err.message);
     }
   };
   return (
-    <Modal title={`${inst.name}: monthly fee`} onClose={onClose}>
-      <form className="stack" onSubmit={save}>
-        <label className="field">Monthly fee (₹)<input className="input" type="number" min="0" step="1" value={fee} onChange={(e) => setFee(e.target.value)} autoFocus /></label>
-        {error && <p className="error-text small">{error}</p>}
-        <div className="row" style={{ justifyContent: 'flex-end' }}>
-          <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
-          <button className="btn primary">Save</button>
+    <Modal title={`${inst.name}: plan & billing`} onClose={onClose} wide>
+      {!b || !f ? (
+        error ? <p className="error-text">{error}</p> : <p className="muted">Loading…</p>
+      ) : (
+        <div className="stack">
+          <div className="row" style={{ gap: 8 }}>
+            <span className={`chip ${billTone(b.state)}`}>{BILL_LABEL[b.state]}</span>
+            <span className="muted small">
+              {b.paidUntil ? `${b.state === 'trial' ? 'Trial ends' : 'Paid until'} ${fmtDay(b.paidUntil)}${b.daysLate ? ` · ${b.daysLate} days late` : ''}` : 'No due date'} · {b.usage.students} students · {b.usage.alertsMonth} alerts this month (fair use {b.usage.fairUseAlerts})
+            </span>
+          </div>
+          <form className="stack" onSubmit={save}>
+            <div className="grid2">
+              <label className="field">
+                Plan
+                <select className="select" value={f.plan} onChange={set('plan')}>
+                  <option value="trial">Trial (30 days, free)</option>
+                  {b.plans.map((p) => <option key={p.id} value={p.id}>{p.name}: ₹{p.monthly.toLocaleString('en-IN')}/month, up to {p.students} students</option>)}
+                  <option value="custom">Custom (agreed fee, no limits)</option>
+                </select>
+              </label>
+              <label className="field">
+                Billing
+                <select className="select" value={f.cycle} onChange={set('cycle')}>
+                  <option value="monthly">Monthly</option>
+                  <option value="yearly">Yearly (10 months' price)</option>
+                </select>
+              </label>
+            </div>
+            <div className="grid2">
+              {f.plan === 'custom' && <label className="field">Agreed monthly fee (₹, before GST)<input className="input" type="number" min="0" step="1" value={f.feeMonthly} onChange={set('feeMonthly')} /></label>}
+              <label className="field">Paid until<input className="input" type="date" value={f.paidUntil ?? ''} onChange={set('paidUntil')} /><span className="hint">Leave empty for no due date. Recording a payment moves it on.</span></label>
+              <label className="field">Payment link<input className="input" value={f.paymentLink ?? ''} onChange={set('paymentLink')} placeholder="https://rzp.io/… or upi://pay?…" /><span className="hint">Empty: owners get a UPI link from your UPI ID, if set.</span></label>
+            </div>
+            <h3>Their invoice details</h3>
+            <div className="grid2">
+              <label className="field">Legal name<input className="input" value={f.legalName ?? ''} onChange={set('legalName')} placeholder={inst.name} /></label>
+              <label className="field">GSTIN (if registered)<input className="input" value={f.gstin ?? ''} onChange={set('gstin')} /></label>
+              <label className="field">State<input className="input" value={f.state ?? ''} onChange={set('state')} placeholder="e.g. Madhya Pradesh" /><span className="hint">Same state as yours: CGST + SGST. Otherwise IGST.</span></label>
+              <label className="field">Address<input className="input" value={f.address ?? ''} onChange={set('address')} /></label>
+            </div>
+            <div><button className="btn primary">Save</button></div>
+          </form>
+          <div className="divider" />
+          <form className="stack" onSubmit={record}>
+            <h3>Record a payment</h3>
+            <div className="grid2">
+              <label className="field">Amount before GST (₹)<input className="input" type="number" min="1" step="any" value={pay.amount} onChange={(e) => setPay({ ...pay, amount: e.target.value })} placeholder={String(b.price ?? '')} /></label>
+              <label className="field">Paid on<input className="input" type="date" value={pay.paidAt} onChange={(e) => setPay({ ...pay, paidAt: e.target.value })} /></label>
+              <label className="field">Method<input className="input" value={pay.method} onChange={(e) => setPay({ ...pay, method: e.target.value })} /></label>
+              <label className="field">Reference (UTR / transaction ID)<input className="input" value={pay.reference} onChange={(e) => setPay({ ...pay, reference: e.target.value })} /></label>
+            </div>
+            <div><button className="btn" disabled={f.plan === 'trial'}>Record payment and make invoice</button></div>
+          </form>
+          {b.payments.length > 0 && (
+            <ul className="list card flush">
+              {b.payments.map((p) => (
+                <li key={p.id} className="list-row">
+                  <span className="grow"><b>{p.invoiceNo}</b><div className="muted small">{fmtDay(p.paidAt)} · {fmtDay(p.periodFrom)} – {fmtDay(p.periodTo)} · {p.method}</div></span>
+                  <span className="num">₹{p.total.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+                  <a className="btn ghost small" href={`/api/agency/payments/${p.id}/invoice`} target="_blank" rel="noreferrer">Invoice</a>
+                </li>
+              ))}
+            </ul>
+          )}
+          {error && <p className="error-text small">{error}</p>}
         </div>
-      </form>
+      )}
+    </Modal>
+  );
+}
+
+/** The agency's own details printed on invoices. */
+function BillingProfile({ onClose, toast }) {
+  const [f, setF] = useState(null);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    api.get('/agency/billing-profile').then(setF).catch((e) => setError(e.message));
+  }, []);
+  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+  const save = async (e) => {
+    e.preventDefault();
+    try {
+      setF(await api.put('/agency/billing-profile', f));
+      toast('Saved');
+      onClose();
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+  return (
+    <Modal title="Your invoice details" onClose={onClose}>
+      {!f ? <p className="muted">Loading…</p> : (
+        <form className="stack" onSubmit={save}>
+          <label className="field">Legal / business name<input className="input" value={f.legalName} onChange={set('legalName')} required /></label>
+          <label className="field">Address<input className="input" value={f.address} onChange={set('address')} /></label>
+          <div className="grid2">
+            <label className="field">GSTIN<input className="input" value={f.gstin} onChange={set('gstin')} /><span className="hint">Leave empty if you aren't registered: invoices then carry no GST.</span></label>
+            <label className="field">State<input className="input" value={f.state} onChange={set('state')} /></label>
+            <label className="field">SAC code<input className="input" value={f.sac} onChange={set('sac')} /><span className="hint">The service code for your invoices. Confirm it with your CA.</span></label>
+            <label className="field">Invoice prefix<input className="input" value={f.invoicePrefix} onChange={set('invoicePrefix')} /></label>
+            <label className="field">UPI ID<input className="input" value={f.upiId} onChange={set('upiId')} placeholder="yourname@okaxis" /><span className="hint">For pay-by-UPI links when an institute has no payment link.</span></label>
+          </div>
+          {error && <p className="error-text small">{error}</p>}
+          <div className="row" style={{ justifyContent: 'flex-end' }}>
+            <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
+            <button className="btn primary">Save</button>
+          </div>
+        </form>
+      )}
     </Modal>
   );
 }
@@ -95,6 +230,7 @@ export default function Agency({ me, logout, theme, toast }) {
   const [data, setData] = useState(null);
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState(null);
+  const [profile, setProfile] = useState(false);
   const load = useCallback(() => api.get('/agency/overview').then(setData).catch((e) => toast(e.message, 'bad')), [toast]);
   useEffect(() => {
     load();
@@ -142,7 +278,10 @@ export default function Agency({ me, logout, theme, toast }) {
             <h1>Your institutes</h1>
             <p className="muted">Build once, set up for every institute. Each one gets its own team, students and WhatsApp number.</p>
           </div>
-          <button className="btn primary" onClick={() => setAdding(true)}><Icon name="plus" /> Add institute</button>
+          <div className="row">
+            <button className="btn ghost" onClick={() => setProfile(true)}>Invoice details</button>
+            <button className="btn primary" onClick={() => setAdding(true)}><Icon name="plus" /> Add institute</button>
+          </div>
         </div>
 
         {!data ? (
@@ -188,7 +327,9 @@ export default function Agency({ me, logout, theme, toast }) {
                       <span className={`chip ${i.whatsapp === 'whatsapp' ? 'ok' : ''}`}>{i.whatsapp === 'whatsapp' ? 'WhatsApp live' : 'Practice mode'}</span>
                     </div>
                     <div className="row between" style={{ borderTop: '1px solid var(--line)', paddingTop: 12 }}>
-                      <button className="link" onClick={() => setEditing(i)}>{fmtMoney(i.feeMonthly)}/month</button>
+                      <button className="link" onClick={() => setEditing(i)}>
+                        {i.plan === 'trial' ? 'Trial' : `${fmtMoney(i.feeMonthly)}/month`} · <span className={`s-${billTone(i.billing.state) === 'bad' ? 'A' : billTone(i.billing.state) === 'warn' ? 'T' : 'P'}`}>{BILL_LABEL[i.billing.state]}</span>
+                      </button>
                       <div className="row">
                         <button className="btn ghost small" onClick={() => toggle(i)}>
                           <Icon name={i.status === 'active' ? 'pause' : 'play'} /> {i.status === 'active' ? 'Pause' : 'Resume'}
@@ -207,7 +348,8 @@ export default function Agency({ me, logout, theme, toast }) {
         )}
       </main>
       {adding && <NewInstitute toast={toast} onClose={() => setAdding(false)} onDone={() => { setAdding(false); load(); }} />}
-      {editing && <EditFee inst={editing} onClose={() => setEditing(null)} onDone={() => { setEditing(null); load(); toast('Fee updated'); }} />}
+      {editing && <BillingPanel inst={editing} toast={toast} onClose={() => setEditing(null)} onDone={load} />}
+      {profile && <BillingProfile toast={toast} onClose={() => setProfile(false)} />}
     </div>
   );
 }

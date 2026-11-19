@@ -9,6 +9,7 @@ const SECTIONS = [
   { id: 'holidays', label: 'Holidays', icon: 'sun' },
   { id: 'team', label: 'Team', icon: 'users' },
   { id: 'whatsapp', label: 'WhatsApp & message', icon: 'chat' },
+  { id: 'billing', label: 'Plan & billing', icon: 'chart' },
   { id: 'privacy', label: 'Privacy & data', icon: 'shield' },
   { id: 'account', label: 'My account', icon: 'user' },
 ];
@@ -456,6 +457,69 @@ function WhatsAppSettings() {
   );
 }
 
+// ------------------------------------------------------------------ plan & billing
+const STATE_TEXT = { ok: 'Paid', trial: 'Free trial', due: 'Payment due', readonly: 'Overdue', lapsed: 'Paused' };
+const day = (d) => (d ? new Date(`${d}T00:00:00`).toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' }) : '—');
+
+function Meter({ label, used, cap, hint }) {
+  const pct = cap ? Math.min(100, Math.round((used / cap) * 100)) : 0;
+  return (
+    <div>
+      <div className="row between"><span>{label}</span><b className="num">{used}{cap ? ` / ${cap}` : ''}</b></div>
+      {cap ? <div className={`bar ${pct >= 100 ? 'bad' : pct >= 85 ? 'warn' : ''}`} style={{ marginTop: 6 }}><span style={{ width: `${pct}%` }} /></div> : null}
+      {hint && <div className="muted small" style={{ marginTop: 4 }}>{hint}</div>}
+    </div>
+  );
+}
+
+function Billing() {
+  const { slug } = useApp();
+  const { data: b } = useData('/billing');
+  if (!b) return <Loading />;
+  const tone = b.state === 'ok' ? 'ok' : b.state === 'trial' ? '' : b.state === 'due' ? 'warn' : 'bad';
+  return (
+    <div className="stack">
+      <section className="card stack">
+        <div className="row between">
+          <div>
+            <h2>{b.planName} plan</h2>
+            <p className="muted small">
+              {b.price ? `₹${b.price.toLocaleString('en-IN')} ${b.cycle === 'yearly' ? 'a year' : 'a month'} + GST` : b.plan === 'trial' ? 'Free for 30 days' : ''}
+              {b.paidUntil ? ` · ${b.state === 'trial' ? 'trial ends' : 'paid until'} ${day(b.paidUntil)}` : ''}
+            </p>
+          </div>
+          <span className={`chip ${tone}`}>{STATE_TEXT[b.state]}</span>
+        </div>
+        {b.paymentLink && b.state !== 'trial' && <div><a className="btn primary" href={b.paymentLink} target="_blank" rel="noreferrer">Pay now</a></div>}
+        <p className="muted small">To change plan, contact your provider. Taking attendance, WhatsApp alerts, replies and call lists are never limited by the plan.</p>
+      </section>
+      <section className="card stack">
+        <h2>This month</h2>
+        <Meter label="Students" used={b.usage.students} cap={b.limits.students} hint={b.limits.students && b.usage.students >= b.limits.students ? 'Plan limit reached: new students can’t be added.' : null} />
+        <Meter label="Team logins" used={b.usage.logins} cap={b.limits.logins} />
+        <Meter label="WhatsApp alerts" used={b.usage.alertsMonth} cap={b.usage.fairUseAlerts || null} hint={`Included: about ${4} alerts per student per month.`} />
+        {!b.limits.fullReports && <p className="muted small">Reports cover the last month. Longer reports and CSV downloads come with the Standard plan.</p>}
+      </section>
+      <section className="card stack">
+        <h2>Invoices</h2>
+        {b.payments.length ? (
+          <ul className="list">
+            {b.payments.map((p) => (
+              <li key={p.id} className="list-row">
+                <span className="grow"><b>{p.invoiceNo}</b><div className="muted small">{day(p.paidAt)} · for {day(p.periodFrom)} – {day(p.periodTo)}</div></span>
+                <span className="num">₹{p.total.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+                <a className="btn ghost small" href={`/api/i/${slug}/billing/invoices/${p.id}`} target="_blank" rel="noreferrer">Download</a>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="muted small">No invoices yet.</p>
+        )}
+      </section>
+    </div>
+  );
+}
+
 // ------------------------------------------------------------------ privacy
 const PRIVACY_ACTION = {
   export_family: 'Downloaded a family\'s data',
@@ -592,7 +656,7 @@ function Account() {
 export default function Settings() {
   const { route } = useApp();
   const section = SECTIONS.find((s) => s.id === route[0]) ?? SECTIONS[0];
-  const View = { general: General, batches: Batches, holidays: Holidays, team: Team, whatsapp: WhatsAppSettings, privacy: Privacy, account: Account }[section.id];
+  const View = { general: General, batches: Batches, holidays: Holidays, team: Team, whatsapp: WhatsAppSettings, billing: Billing, privacy: Privacy, account: Account }[section.id];
   return (
     <div>
       <div className="page-head"><div><h1>Settings</h1></div></div>

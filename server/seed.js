@@ -216,5 +216,15 @@ export function seedDemo(platform) {
   tp.recordAllConsents({ recordedBy: 'Admission desk' });
   generateHistory(tp, { days: 10, rates: tpData.rates, seed: 3 });
   platform.updateInstitute('toppers', { status: 'paused' });
+
+  // Billing: a sample agency profile, Bright Future on Standard with two invoices, Excel on Starter
+  // and three days overdue (so the reminder shows), Toppers on an agreed custom fee.
+  platform.setBillingProfile({ legalName: 'Demo Agency (sample)', address: 'Indore, Madhya Pradesh', gstin: '23ABCDE1234F1Z5', state: 'Madhya Pradesh', sac: '998314', invoicePrefix: 'DEMO' });
+  const today = platform.today();
+  platform.setBilling('bright-future', { plan: 'standard', cycle: 'monthly', paidUntil: null, legalName: 'Bright Future Classes', state: 'Madhya Pradesh', address: 'Indore' });
+  platform.recordPayment('bright-future', { method: 'UPI', reference: 'demo-1', paidAt: addDays(today, -40), recordedBy: 'Agency Admin' });
+  platform.recordPayment('bright-future', { method: 'UPI', reference: 'demo-2', paidAt: addDays(today, -10), recordedBy: 'Agency Admin' });
+  platform.setBilling('excel', { plan: 'starter', cycle: 'monthly', paidUntil: addDays(today, -3), legalName: 'Excel Coaching Centre', state: 'Madhya Pradesh' });
+  platform.setBilling('toppers', { plan: 'custom', feeMonthly: 12000, paidUntil: null, state: 'Rajasthan' });
   return true;
 }

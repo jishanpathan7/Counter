@@ -70,6 +70,32 @@ for the same. So by default (Settings → General → *Parent consent*):
 - Every change is kept in a consent log (who, how, when and the wording agreed to), shown on the
   student's profile. Numbers that aren't in the student list can't opt themselves in.
 
+### Plans and billing
+
+| Plan | Price (before GST) | Students | Logins | Reports |
+| --- | --- | --- | --- | --- |
+| Trial | free, 30 days | 100 | 5 | full |
+| Starter | ₹999 / month | 100 | 3 | last month |
+| Standard | ₹1,999 / month | 300 | 10 | full + CSV |
+| Pro | ₹3,999 / month | 1,000 | 25 | full + CSV |
+| Custom | agreed fee | no limit | no limit | full + CSV |
+
+A year costs ten months. Limits only stop adding students or logins. Taking attendance, alerts,
+replies and calls are never limited.
+
+- **Late payment:**
+  - for the first 7 days after the paid-until date, a banner with a "Pay now" link;
+  - from day 8 to 14, setup changes are paused but attendance and alerts carry on;
+  - after 14 days the institute is paused. The agency can always get in.
+- **Payments.** The agency records each payment (the institute's own payment link, or a UPI link
+  built from the agency's UPI ID), which moves the paid-until date on by one period and issues a
+  GST invoice: one numbering sequence per financial year, CGST + SGST in the same state, IGST
+  across states, and no GST if the agency isn't registered. Invoices open as a printable page
+  (save as PDF) and are kept even if the institute is deleted.
+- **Usage.** Owners see students, logins and WhatsApp alerts this month against the plan
+  (about 4 alerts per student per month are included). Institutes from before plans existed are
+  on "Custom" with no due date, so nothing changes for them until the agency sets a plan.
+
 ### Login security
 
 - PINs are 6–8 digits and can't be `123456`, one digit repeated, a simple pattern or part of the
