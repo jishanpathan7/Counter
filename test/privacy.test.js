@@ -89,6 +89,7 @@ async function start(tt) {
     }
   });
   const base = `http://127.0.0.1:${server.address().port}`;
+  platform.__base = base;
   const client = async (phone) => {
     const r = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone, pin: DEMO_PIN }) });
     const cookie = r.headers.get('set-cookie')?.split(';')[0] ?? '';
@@ -239,4 +240,70 @@ test('access log and sign-in log: who opened what, who signed in (numbers masked
   const failed = log.find((l) => l.event === 'login_failed');
   assert.equal(failed.phone, '91******0003', 'phone numbers masked');
   assert.equal((await owner('GET', '/api/agency/auth-log')).status, 403);
+});
+
+test('owners on a new device enter a WhatsApp code (only with real WhatsApp); remembered devices skip it', async (tt) => {
+  const { platform, client } = await start(tt);
+  const sent = [];
+  let fail = false;
+  const bf = platform.service('bright-future');
+  // Real WhatsApp but no sign-in template yet: no code asked for.
+  bf.messenger = { mode: 'whatsapp', async send() { throw new Error('should not send'); } };
+  assert.equal((await (await fetch(`${platform.__base}/api/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone: '9999900001', pin: DEMO_PIN }) })).json()).needsCode, undefined);
+  bf.updateWhatsAppConfig({ otpTemplate: 'login_code' });
+  bf.messenger = { mode: 'whatsapp', async send(m) { if (fail) throw new Error('Meta down'); sent.push(m); return { id: `w${sent.length}` }; } };
+  const login = (phone, cookie = '') =>
+    fetch(`${platform.__base}/api/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json', cookie }, body: JSON.stringify({ phone, pin: DEMO_PIN }) });
+  const code = (body, cookie = '') => fetch(`${platform.__base}/api/auth/code`, { method: 'POST', headers: { 'Content-Type': 'application/json', cookie }, body: JSON.stringify(body) });
+
+  // New device: no session yet, a code goes to the owner's WhatsApp.
+  let r = await login('9999900001');
+  let body = await r.json();
+  assert.equal(body.needsCode, true);
+  assert.equal(body.sentTo, '••••0001');
+  assert.equal(r.headers.get('set-cookie'), null, 'no session before the code');
+  assert.equal(sent.at(-1).template, 'otp');
+  const theCode = sent.at(-1).params[0];
+  assert.match(theCode, /^\d{6}$/);
+  assert.equal(bf.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE body LIKE '%sign-in code%'").get().n, 0, 'codes are not kept in the WhatsApp log');
+
+  assert.equal((await code({ challenge: body.challenge, code: '000000' })).status, 401);
+  r = await code({ challenge: body.challenge, code: theCode, remember: true });
+  assert.equal(r.status, 200);
+  const cookies = r.headers.getSetCookie();
+  assert.ok(cookies.some((c) => c.startsWith('aa_session=')));
+  const device = cookies.find((c) => c.startsWith('aa_device=')).split(';')[0];
+  assert.equal((await code({ challenge: body.challenge, code: theCode })).status, 401, 'a code works once');
+
+  // Remembered device: straight in.
+  body = await (await login('9999900001', device)).json();
+  assert.equal(body.needsCode, undefined);
+  assert.equal(body.user.name, 'Rakesh Sharma');
+
+  // Front desk never gets a code; agency neither.
+  assert.equal((await (await login('9999900002')).json()).needsCode, undefined);
+  assert.equal((await (await login('9999900000')).json()).needsCode, undefined);
+
+  // WhatsApp down: the owner still gets in (no lock-out), and the agency's sign-in log shows it.
+  fail = true;
+  body = await (await login('9999900001')).json();
+  assert.equal(body.needsCode, undefined);
+  assert.equal(platform.listAuthLog(5).find((l) => l.event === 'new_device_no_code')?.name, 'Rakesh Sharma');
+  fail = false;
+
+  // A new PIN forgets remembered devices.
+  const u = platform.db.prepare("SELECT id FROM users WHERE phone = '919999900001'").get();
+  platform.setPin(u.id, '582047');
+  const again = await fetch(`${platform.__base}/api/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json', cookie: device }, body: JSON.stringify({ phone: '9999900001', pin: '582047' }) });
+  assert.equal((await again.json()).needsCode, true);
+  void client;
+});
+
+test('login-code template payload: code in the body and the copy-code button', async () => {
+  const { buildPayload } = await import('../server/messaging.js');
+  const p = buildPayload({ to: '919999900001', text: 'x', params: ['123456'], templateName: 'login_code', templateLanguage: 'en', otp: true });
+  assert.deepEqual(p.template.components, [
+    { type: 'body', parameters: [{ type: 'text', text: '123456' }] },
+    { type: 'button', sub_type: 'url', index: '0', parameters: [{ type: 'text', text: '123456' }] },
+  ]);
 });

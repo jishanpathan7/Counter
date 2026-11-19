@@ -33,12 +33,20 @@ export function Login({ demo, onDone }) {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
+  const [challenge, setChallenge] = useState(null);
+  const [code, setCode] = useState('');
+  const [remember, setRemember] = useState(true);
+
   const submit = async (e, p = phone, k = pin) => {
     e?.preventDefault();
     setBusy(true);
     setError('');
     try {
-      await api.post('/auth/login', { phone: p, pin: k });
+      const r = await api.post('/auth/login', { phone: p, pin: k });
+      if (r.needsCode) {
+        setChallenge(r);
+        return;
+      }
       await onDone(k);
     } catch (err) {
       setError(err.message);
@@ -46,6 +54,45 @@ export function Login({ demo, onDone }) {
       setBusy(false);
     }
   };
+
+  const verify = async (e) => {
+    e.preventDefault();
+    setBusy(true);
+    setError('');
+    try {
+      await api.post('/auth/code', { challenge: challenge.challenge, code, remember });
+      await onDone(pin);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (challenge) {
+    return (
+      <div className="auth">
+        <Hero />
+        <section className="auth-panel">
+          <form className="auth-card stack" onSubmit={verify}>
+            <div>
+              <div className="eyebrow">New device</div>
+              <h1>Enter the code</h1>
+              <p className="muted">We sent a 6-digit code to your WhatsApp ({challenge.sentTo}). This keeps your institute safe if someone learns your PIN.</p>
+            </div>
+            <label className="field">
+              Code
+              <input className="input" inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, ''))} autoFocus />
+            </label>
+            <label className="check"><input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} /> Remember this device for 90 days</label>
+            {error && <p className="error-text small">{error}</p>}
+            <button className="btn primary block" disabled={busy || code.length !== 6}>{busy ? 'Checking…' : 'Continue'}</button>
+            <button type="button" className="btn ghost block" onClick={() => { setChallenge(null); setCode(''); setError(''); }}>Back</button>
+          </form>
+        </section>
+      </div>
+    );
+  }
 
   return (
     <div className="auth">

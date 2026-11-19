@@ -36,7 +36,7 @@ const OPT_IN_RE = /^\s*(start|subscribe|shuru|शुरू)(?=\s|$|[.!])/i;
 const YES_RE = /^\s*(haan|han|ha|yes|ok|हाँ|हां)[.! ]*$/i;
 
 /** WhatsApp Cloud API settings, kept per institute. Secrets never leave the server. */
-const WA_KEYS = ['token', 'phoneNumberId', 'displayPhone', 'template', 'digestTemplate', 'templateLang', 'verifyToken', 'appSecret'];
+const WA_KEYS = ['token', 'phoneNumberId', 'displayPhone', 'template', 'digestTemplate', 'otpTemplate', 'templateLang', 'verifyToken', 'appSecret'];
 const WA_SECRET = new Set(['token', 'appSecret']);
 
 /** Fill {placeholders} in a message template. */
@@ -629,6 +629,16 @@ export class AttendanceService {
       this.changed();
     }
     return counts;
+  }
+
+  /** A sign-in code for an owner on a new device. Not stored in the WhatsApp log (it's a secret). */
+  async sendLoginCode(phone, code) {
+    await this.messenger.send({
+      to: normalizePhone(phone),
+      text: `${code} is your Attendance Alert sign-in code. It expires in 10 minutes. Never share it.`,
+      template: 'otp',
+      params: [code],
+    });
   }
 
   /** First-week checklist for a new institute (the team count comes from the platform). */

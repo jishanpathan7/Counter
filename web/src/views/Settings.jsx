@@ -432,6 +432,7 @@ function WhatsAppSettings() {
               </div>
               <div className="grid2">
                 <label className="field">Template language<input className="input" value={f.templateLang} onChange={(e) => setF({ ...f, templateLang: e.target.value })} placeholder="en" /></label>
+                <label className="field">Sign-in code template<input className="input" value={f.otpTemplate ?? ''} onChange={(e) => setF({ ...f, otpTemplate: e.target.value })} placeholder="login_code" /><span className="hint">Approved "authentication" template with a copy-code button. With it, owners signing in on a new device get a code on WhatsApp.</span></label>
               </div>
               <h3>Webhook (for parent replies)</h3>
               <div className="field">

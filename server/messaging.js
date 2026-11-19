@@ -91,7 +91,10 @@ export function createWhatsAppMessenger({
       if (template === 'digest' && !templateName) {
         throw new WhatsAppError('No owner-summary template is set up (Settings → WhatsApp), so the summary was not sent.');
       }
-      const payload = buildPayload({ to, text, buttons, params, templateName, templateLanguage });
+      if (template === 'otp' && !templateName) {
+        throw new WhatsAppError('No login-code template is set up (Settings → WhatsApp), so the code was not sent.');
+      }
+      const payload = buildPayload({ to, text, buttons, params, templateName, templateLanguage, otp: template === 'otp' });
       for (let i = 0; ; i++) {
         try {
           return await attempt(payload);
@@ -111,8 +114,24 @@ const cleanParam = (p) =>
     .replace(/ {4,}/g, '   ')
     .trim() || '-';
 
-export function buildPayload({ to, text, buttons, params, templateName, templateLanguage = 'en' }) {
+export function buildPayload({ to, text, buttons, params, templateName, templateLanguage = 'en', otp = false }) {
   const base = { messaging_product: 'whatsapp', recipient_type: 'individual', to };
+  // Authentication template: the code goes in the body and in the "copy code" button.
+  if (otp && templateName && params?.[0]) {
+    const code = String(params[0]);
+    return {
+      ...base,
+      type: 'template',
+      template: {
+        name: templateName,
+        language: { code: templateLanguage },
+        components: [
+          { type: 'body', parameters: [{ type: 'text', text: code }] },
+          { type: 'button', sub_type: 'url', index: '0', parameters: [{ type: 'text', text: code }] },
+        ],
+      },
+    };
+  }
   if (templateName && params) {
     return {
       ...base,
@@ -199,7 +218,7 @@ export function messengerFromConfig(cfg = {}, { apiVersion } = {}) {
     return createWhatsAppMessenger({
       token: cfg.token,
       phoneNumberId: cfg.phoneNumberId,
-      templates: { alert: cfg.template, digest: cfg.digestTemplate },
+      templates: { alert: cfg.template, digest: cfg.digestTemplate, otp: cfg.otpTemplate },
       templateLanguage: cfg.templateLang || 'en',
       apiVersion,
     });

@@ -121,6 +121,12 @@ each month.
   15 minutes. One person guessing can't lock the real user out of their own device.
 - Every login is a server-side session. Logging out ends it for good (a copied cookie stops working),
   and changing or resetting a PIN signs that person out on every other device.
+- **New-device check for owners.** When an institute has real WhatsApp and an approved
+  "authentication" template (Settings → WhatsApp → Technical setup), an owner signing in on a new
+  device must also enter a 6-digit code sent on WhatsApp (10 minutes, 5 tries). They can remember
+  the device for 90 days, and a new PIN forgets all remembered devices. If WhatsApp can't send the
+  code, the owner still gets in with their PIN, and the sign-in log flags it, so nobody is ever
+  locked out by a WhatsApp outage.
 - Behind a proxy or load balancer set `TRUST_PROXY` so limits use the visitor's real address.
 
 ### Privacy and data

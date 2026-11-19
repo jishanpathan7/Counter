@@ -151,11 +151,30 @@ export function createApp({ platform, hub, demo = false, setupToken = null, real
     });
   });
 
+  const DEVICE_COOKIE = 'aa_device';
   app.post('/api/auth/login', async (req, res) => {
     const { user, weakPin } = await platform.authenticate(req.body?.phone, String(req.body?.pin ?? ''), { ip: req.ip });
     // Older 4-digit or guessable PINs still work once, but must be replaced before anything else.
     const mustChangePin = weakPin;
+    // Owners on a new device: a code on WhatsApp first (only where real WhatsApp is connected).
+    const slug = platform.deviceCodeInstitute(user, parseCookies(req.headers.cookie)[DEVICE_COOKIE]);
+    if (slug) {
+      const challenge = await platform.startLoginCode(user, slug, { mustChangePin, ip: req.ip });
+      if (challenge) return res.json({ needsCode: true, challenge: challenge.id, sentTo: challenge.sentTo });
+      // WhatsApp couldn't send it: let the owner in rather than lock them out (logged for the agency).
+    }
     setSession(req, res, user, { mustChangePin });
+    res.json({ user: { ...platform.publicUser(user), mustChangePin }, memberships: platform.membershipsFor(user) });
+  });
+
+  app.post('/api/auth/code', (req, res) => {
+    const { user, mustChangePin } = platform.verifyLoginCode(req.body?.challenge, req.body?.code, { ip: req.ip });
+    setSession(req, res, user, { mustChangePin });
+    if (req.body?.remember) {
+      const secure = req.secure || req.get('x-forwarded-proto') === 'https' ? '; Secure' : '';
+      const token = platform.trustDevice(user.id, req.get('user-agent') ?? '');
+      res.append('Set-Cookie', `${DEVICE_COOKIE}=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${60 * 60 * 24 * 90}${secure}`);
+    }
     res.json({ user: { ...platform.publicUser(user), mustChangePin }, memberships: platform.membershipsFor(user) });
   });
 

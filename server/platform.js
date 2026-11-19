@@ -99,6 +99,24 @@ CREATE TABLE IF NOT EXISTS auth_log (
   ip      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_auth_log_at ON auth_log(at);
+-- Devices an owner chose to remember after entering a WhatsApp code (90 days).
+CREATE TABLE IF NOT EXISTS trusted_devices (
+  id           INTEGER PRIMARY KEY,
+  user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_hash   TEXT NOT NULL UNIQUE,
+  label        TEXT,
+  created_at   TEXT NOT NULL,
+  last_used_at TEXT NOT NULL
+);
+-- One-time sign-in codes sent on WhatsApp to owners on a new device.
+CREATE TABLE IF NOT EXISTS login_codes (
+  id         TEXT PRIMARY KEY,
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  code_hash  TEXT NOT NULL,
+  expires_at INTEGER NOT NULL,
+  attempts   INTEGER NOT NULL DEFAULT 0,
+  must_change_pin INTEGER NOT NULL DEFAULT 0
+);
 -- Payments received. Kept even if the institute is later deleted: invoices are tax records.
 CREATE TABLE IF NOT EXISTS payments (
   id             INTEGER PRIMARY KEY,
@@ -301,6 +319,81 @@ export class Platform {
     this.db.prepare('DELETE FROM auth_log WHERE at < ?').run(new Date(this.clock() - 180 * 86_400_000).toISOString());
   }
 
+  // ------------------------------------------- new-device codes for owners
+
+  static DEVICE_DAYS = 90;
+
+  /**
+   * An owner signing in on a device they haven't verified gets a code on WhatsApp, if one of their
+   * institutes has real WhatsApp connected. Returns that institute's slug, or null (no code needed).
+   */
+  deviceCodeInstitute(user, deviceToken) {
+    if (!user || user.is_agency) return null;
+    if (deviceToken) {
+      const hash = crypto.createHash('sha256').update(String(deviceToken)).digest('hex');
+      const d = this.db.prepare('SELECT * FROM trusted_devices WHERE user_id = ? AND token_hash = ?').get(user.id, hash);
+      if (d && Date.parse(d.last_used_at) > this.clock() - Platform.DEVICE_DAYS * 86_400_000) {
+        this.db.prepare('UPDATE trusted_devices SET last_used_at = ? WHERE id = ?').run(this.nowIso(), d.id);
+        return null;
+      }
+    }
+    const owned = this.db
+      .prepare("SELECT i.slug FROM memberships m JOIN institutes i ON i.id = m.institute_id WHERE m.user_id = ? AND m.role = 'owner' AND i.status = 'active'")
+      .all(user.id);
+    // Only once a sign-in code template is approved; otherwise there's nothing reliable to send.
+    return owned.map((o) => o.slug).find((slug) => this.service(slug).messenger?.mode === 'whatsapp' && this.service(slug).getWhatsAppConfig().otpTemplate) ?? null;
+  }
+
+  /** Send the code. Returns { id, sentTo } or null if WhatsApp couldn't send it. */
+  async startLoginCode(user, slug, { mustChangePin = false, ip = null } = {}) {
+    const code = String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
+    const id = crypto.randomBytes(16).toString('base64url');
+    try {
+      await this.service(slug).sendLoginCode(user.phone, code);
+    } catch (err) {
+      this.logger.warn?.(`Sign-in code for ${slug} not sent: ${err.message}`);
+      this.authLog('new_device_no_code', { userId: user.id, phone: user.phone, ip });
+      return null;
+    }
+    this.db.prepare('DELETE FROM login_codes WHERE user_id = ? OR expires_at < ?').run(user.id, this.clock());
+    this.db
+      .prepare('INSERT INTO login_codes (id, user_id, code_hash, expires_at, must_change_pin) VALUES (?, ?, ?, ?, ?)')
+      .run(id, user.id, crypto.createHash('sha256').update(`${id}:${code}`).digest('hex'), this.clock() + 10 * 60_000, mustChangePin ? 1 : 0);
+    this.authLog('code_sent', { userId: user.id, phone: user.phone, ip });
+    return { id, sentTo: `••••${user.phone.slice(-4)}` };
+  }
+
+  /** Check a code: 5 tries, 10 minutes. Returns { user, mustChangePin } or throws. */
+  verifyLoginCode(id, code, { ip = null } = {}) {
+    const c = this.db.prepare('SELECT * FROM login_codes WHERE id = ?').get(String(id ?? ''));
+    if (!c || c.expires_at < this.clock()) throw new HttpError(401, 'That code has expired. Sign in again to get a new one.');
+    if (c.attempts >= 5) throw new HttpError(429, 'Too many wrong codes. Sign in again to get a new one.');
+    const given = crypto.createHash('sha256').update(`${c.id}:${String(code ?? '').trim()}`).digest('hex');
+    const ok = crypto.timingSafeEqual(Buffer.from(given), Buffer.from(c.code_hash));
+    if (!ok) {
+      this.db.prepare('UPDATE login_codes SET attempts = attempts + 1 WHERE id = ?').run(c.id);
+      this.authLog('code_failed', { userId: c.user_id, ip });
+      throw new HttpError(401, 'Wrong code. Check the latest WhatsApp message.');
+    }
+    this.db.prepare('DELETE FROM login_codes WHERE id = ?').run(c.id);
+    const user = this.getUser(c.user_id);
+    this.authLog('login', { userId: user.id, phone: user.phone, ip });
+    return { user, mustChangePin: Boolean(c.must_change_pin) };
+  }
+
+  /** Remember this device for the owner; returns the token for the device cookie. */
+  trustDevice(userId, label = '') {
+    const token = crypto.randomBytes(24).toString('base64url');
+    this.db
+      .prepare('INSERT INTO trusted_devices (user_id, token_hash, label, created_at, last_used_at) VALUES (?, ?, ?, ?, ?)')
+      .run(userId, crypto.createHash('sha256').update(token).digest('hex'), String(label).slice(0, 120), this.nowIso(), this.nowIso());
+    return token;
+  }
+
+  forgetDevices(userId) {
+    this.db.prepare('DELETE FROM trusted_devices WHERE user_id = ?').run(userId);
+  }
+
   listAuthLog(limit = 200) {
     return this.db
       .prepare('SELECT a.at, a.event, a.phone, a.ip, u.name FROM auth_log a LEFT JOIN users u ON u.id = a.user_id ORDER BY a.id DESC LIMIT ?')
@@ -311,6 +404,7 @@ export class Platform {
     const u = this.getUser(userId);
     this.db.prepare('UPDATE users SET pin_hash = ?, token_version = token_version + 1 WHERE id = ?').run(hashPin(requirePin(pin, u?.phone)), userId);
     this.signOutEverywhere(userId);
+    this.forgetDevices(userId); // a new PIN means devices must be verified again
     this.authLog('pin_changed', { userId, phone: u?.phone });
   }
 
