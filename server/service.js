@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { addDays, daysBetween, formatTime, localDate, localTime, localWeekday, zonedTimeToIso } from './time.js';
 
 export class HttpError extends Error {
@@ -629,6 +630,39 @@ export class AttendanceService {
       this.changed();
     }
     return counts;
+  }
+
+  /**
+   * The institute's own logo (PNG, JPEG or WebP, at most 200 KB). SVG is refused: it can carry script.
+   * The first bytes are checked, not just the label, so a disguised file is turned away.
+   */
+  setLogo(dataUrl) {
+    const m = /^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/=]+)$/.exec(String(dataUrl ?? ''));
+    if (!m) throw new HttpError(400, 'Upload a PNG, JPEG or WebP image');
+    const buf = Buffer.from(m[2], 'base64');
+    if (buf.length > 200 * 1024) throw new HttpError(400, 'The logo must be 200 KB or smaller');
+    const sig = { png: [0x89, 0x50, 0x4e, 0x47], jpeg: [0xff, 0xd8, 0xff], webp: [0x52, 0x49, 0x46, 0x46] }[m[1]];
+    if (!sig.every((b, i) => buf[i] === b)) throw new HttpError(400, "That file isn't a real image");
+    this.setSetting('logo', `${m[1]}:${m[2]}`);
+    this.changed();
+    return { logoVersion: this.logoVersion() };
+  }
+
+  clearLogo() {
+    this.db.prepare("DELETE FROM settings WHERE key = 'logo'").run();
+    this.changed();
+  }
+
+  getLogo() {
+    const v = this.rawSettings().logo;
+    if (!v) return null;
+    const [type, b64] = v.split(':');
+    return { type: `image/${type}`, body: Buffer.from(b64, 'base64') };
+  }
+
+  logoVersion() {
+    const v = this.rawSettings().logo;
+    return v ? createHash('sha256').update(v).digest('hex').slice(0, 10) : null;
   }
 
   /** A sign-in code for an owner on a new device. Not stored in the WhatsApp log (it's a secret). */

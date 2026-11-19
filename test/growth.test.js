@@ -42,3 +42,35 @@ test('landing page info is public; referral links are counted and partners see t
   assert.equal(kota.commissionMonthly, 199.8);
   assert.equal((await agency('PATCH', '/api/agency/institutes/excel/billing', { referralCode: 'MISSING' })).status, 404);
 });
+
+test('logo upload: real PNG/JPEG/WebP only, 200 KB max, owner only; the team can see it', async (tt) => {
+  const platform = new Platform({ logger: quiet });
+  seedDemo(platform);
+  const server = createApp({ platform, hub: createEventHub(), logger: quiet }).listen(0);
+  tt.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const login = async (phone) => {
+    const r = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone, pin: DEMO_PIN }) });
+    const cookie = r.headers.get('set-cookie').split(';')[0];
+    return (method, p, body) => fetch(`${base}${p}`, { method, headers: { cookie, 'Content-Type': 'application/json' }, body: body && JSON.stringify(body) });
+  };
+  const owner = await login('9999900001');
+  const desk = await login('9999900002');
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+  const put = (who, dataUrl) => who('PUT', '/api/i/bright-future/settings/logo', { dataUrl });
+
+  assert.equal((await put(owner, `data:image/svg+xml;base64,${Buffer.from('<svg onload="alert(1)"/>').toString('base64')}`)).status, 400, 'no SVG');
+  assert.equal((await put(owner, `data:image/png;base64,${Buffer.from('<html>not a png</html>').toString('base64')}`)).status, 400, 'checks the bytes');
+  assert.equal((await put(owner, `data:image/png;base64,${Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), Buffer.alloc(210 * 1024)]).toString('base64')}`)).status, 400, 'size limit');
+  assert.equal((await put(desk, `data:image/png;base64,${png}`)).status, 403, 'owner only');
+  const ok = await put(owner, `data:image/png;base64,${png}`);
+  assert.equal(ok.status, 200);
+  const { logoVersion } = await ok.json();
+  assert.match(logoVersion, /^[0-9a-f]{10}$/);
+  assert.equal((await (await desk('GET', '/api/i/bright-future/info')).json()).logoVersion, logoVersion);
+  const img = await desk('GET', '/api/i/bright-future/logo');
+  assert.equal(img.headers.get('content-type'), 'image/png');
+  assert.equal(Buffer.from(await img.arrayBuffer()).toString('base64'), png);
+  assert.equal((await owner('DELETE', '/api/i/bright-future/settings/logo')).status, 204);
+  assert.equal((await desk('GET', '/api/i/bright-future/logo')).status, 404);
+});

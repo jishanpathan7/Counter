@@ -303,6 +303,7 @@ export function createApp({ platform, hub, demo = false, setupToken = null, real
       // Parents opt in by messaging START to this number (wa.me link / QR on the admission form).
       optInPhone: String(req.svc.getWhatsAppConfig().displayPhone || '').replace(/\D/g, '') || null,
       requireConsent: req.svc.getSettings().requireConsent,
+      logoVersion: req.svc.logoVersion(),
       billing: role === 'teacher' ? null : (() => {
         const b = platform.billingFor(slug);
         return { state: b.state, daysLeft: b.daysLeft, daysLate: b.daysLate, planName: b.planName, paymentLink: role === 'owner' ? b.paymentLink : null, paidUntil: b.paidUntil };
@@ -510,6 +511,19 @@ export function createApp({ platform, hub, demo = false, setupToken = null, real
   inst.post('/team', OWNER, (req, res) => {
     platform.checkLimit(req.params.slug, 'logins');
     res.status(201).json(platform.addMember(req.params.slug, req.body ?? {}));
+  });
+
+  // the institute's logo
+  inst.get('/logo', (req, res) => {
+    const logo = req.svc.getLogo();
+    if (!logo) return res.sendStatus(404);
+    res.set({ 'Content-Type': logo.type, 'Cache-Control': 'private, max-age=86400', 'Content-Security-Policy': "default-src 'none'" });
+    res.send(logo.body);
+  });
+  inst.put('/settings/logo', OWNER, (req, res) => res.json(req.svc.setLogo(req.body?.dataUrl)));
+  inst.delete('/settings/logo', OWNER, (req, res) => {
+    req.svc.clearLogo();
+    res.sendStatus(204);
   });
 
   // first-week checklist (owner)

@@ -45,6 +45,12 @@ function useToast() {
   return [toast, show];
 }
 
+/** The institute's own logo if it uploaded one, otherwise the app's mark. */
+function InstituteMark({ info, slug }) {
+  if (!info.logoVersion) return <BrandMark />;
+  return <img className="inst-logo" src={`/api/i/${slug}/logo?v=${info.logoVersion}`} alt="" width="36" height="36" />;
+}
+
 /** Trial ending or payment late: say so plainly, with a way to pay. Never shown to teachers. */
 function BillingBanner({ info }) {
   const b = info.billing;
@@ -208,7 +214,7 @@ function InstituteApp({ slug, me, logout, theme }) {
       <div className="shell">
         <aside className="sidebar">
           <div className="brand">
-            <BrandMark />
+            <InstituteMark info={info} slug={slug} />
             <div className="grow">
               <div className="brand-name ellipsis" title={info.institute.name}>{info.institute.name}</div>
               <div className="brand-sub">Attendance Alert</div>
@@ -240,7 +246,7 @@ function InstituteApp({ slug, me, logout, theme }) {
 
         <div style={{ minWidth: 0 }}>
           <header className="topline">
-            <BrandMark />
+            <InstituteMark info={info} slug={slug} />
             <div className="grow">
               <div className="brand-name ellipsis">{info.institute.name}</div>
               <div className="tiny muted">{me.user.name} · {ROLE_LABEL[info.role]}</div>

@@ -28,6 +28,59 @@ function useSave() {
   };
 }
 
+// ------------------------------------------------------------------ logo
+/** Shrink an image file to at most 256 px and return a data URL (keeps uploads small). */
+function shrinkImage(file) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, 256 / Math.max(img.width, img.height));
+      const c = document.createElement('canvas');
+      c.width = Math.round(img.width * scale);
+      c.height = Math.round(img.height * scale);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(img.src);
+      resolve(c.toDataURL('image/png'));
+    };
+    img.onerror = () => reject(new Error("That file couldn't be read as an image"));
+    img.src = URL.createObjectURL(file);
+  });
+}
+
+function LogoField() {
+  const { api, slug, info, toast } = useApp();
+  const pick = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    if (!/^image\/(png|jpeg|webp)$/.test(file.type)) return toast('Choose a PNG, JPEG or WebP image', 'bad');
+    try {
+      await api.put('/settings/logo', { dataUrl: await shrinkImage(file) });
+      toast('Logo saved');
+    } catch (err) {
+      toast(err.message, 'bad');
+    }
+  };
+  const remove = async () => {
+    await api.del('/settings/logo').catch(() => {});
+    toast('Logo removed');
+  };
+  return (
+    <div className="field">
+      Logo
+      <div className="row" style={{ gap: 12 }}>
+        {info.logoVersion ? <img className="inst-logo lg" src={`/api/i/${slug}/logo?v=${info.logoVersion}`} alt="Current logo" /> : <span className="muted small">No logo yet: the app's mark is shown.</span>}
+        <label className="btn ghost small">
+          {info.logoVersion ? 'Change' : 'Upload'}
+          <input type="file" accept="image/png,image/jpeg,image/webp" onChange={pick} style={{ display: 'none' }} />
+        </label>
+        {info.logoVersion && <button type="button" className="btn ghost small" onClick={remove}>Remove</button>}
+      </div>
+      <span className="hint">Square works best. Shown to your team in the app.</span>
+    </div>
+  );
+}
+
 // ------------------------------------------------------------------ general
 function General() {
   const { api, info } = useApp();
@@ -46,6 +99,7 @@ function General() {
       <form className="card stack" onSubmit={(e) => { e.preventDefault(); save(() => api.patch('/settings', f).then(setF)); }}>
         <h2>Institute & timing</h2>
         <label className="field">Institute name<input className="input" value={f.instituteName} onChange={set('instituteName')} /></label>
+        <LogoField />
         <div className="grid2">
           <label className="field">
             Message parents after (minutes)

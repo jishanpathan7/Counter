@@ -6,7 +6,7 @@ function Hero() {
   return (
     <section className="auth-hero">
       <div className="row" style={{ gap: 12 }}>
-        <div className="brand-mark" style={{ background: '#fff', color: 'var(--green)' }}><Icon name="check" /></div>
+        <div className="brand-mark" style={{ background: '#fff', color: 'var(--brand-fill)' }}><Icon name="check" /></div>
         <b style={{ fontSize: 20 }}>Attendance Alert</b>
       </div>
       <div className="stack">
